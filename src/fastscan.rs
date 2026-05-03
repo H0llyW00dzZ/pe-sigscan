@@ -127,4 +127,44 @@ mod tests {
     fn empty_slice_returns_none() {
         assert_eq!(first_byte_in_slice(&[], 0x42), None);
     }
+
+    /// SWAR false-positive path: the bit-trick over-approximates when
+    /// bytes have the high bit set. We need to ensure the inner per-byte
+    /// confirmation loop runs and correctly rejects non-matches.
+    ///
+    /// We use the SWAR variant directly so the check runs even when the
+    /// `memchr` feature is enabled (in which case `first_byte_in_slice`
+    /// would otherwise delegate to memchr).
+    #[test]
+    fn swar_handles_high_bit_bytes_without_false_positive() {
+        // High-bit bytes everywhere; needle is absent.
+        let buf = vec![0xFFu8; 64];
+        assert_eq!(swar_first_byte(&buf, 0x42), None);
+    }
+
+    #[test]
+    fn swar_finds_needle_among_high_bit_bytes() {
+        let mut buf = vec![0xFFu8; 64];
+        buf[37] = 0x42;
+        assert_eq!(swar_first_byte(&buf, 0x42), Some(37));
+    }
+
+    /// `first_byte_in_raw` is exercised indirectly via the in-process
+    /// scanners, but a direct test makes failure modes obvious and keeps
+    /// the helper's safety contract explicit.
+    #[test]
+    fn first_byte_in_raw_finds_needle() {
+        let buf = b"sigscan-test";
+        let result = unsafe { first_byte_in_raw(buf.as_ptr() as usize, buf.len(), b's') };
+        assert_eq!(result, Some(0));
+        let result_t = unsafe { first_byte_in_raw(buf.as_ptr() as usize, buf.len(), b't') };
+        assert_eq!(result_t, Some(8));
+    }
+
+    #[test]
+    fn first_byte_in_raw_returns_none_when_absent() {
+        let buf = vec![0u8; 64];
+        let result = unsafe { first_byte_in_raw(buf.as_ptr() as usize, buf.len(), 0xFF) };
+        assert_eq!(result, None);
+    }
 }

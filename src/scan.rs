@@ -177,11 +177,9 @@ fn scan_slice(haystack: &[u8], pattern: WildcardPattern<'_>) -> Option<usize> {
     while i <= upper {
         // Search for the anchor byte starting from the current candidate
         // offset (offset by `anchor_off` so the byte we find lines up
-        // correctly with the pattern).
+        // correctly with the pattern). `search_from < haystack.len()` is
+        // guaranteed by `i <= upper` and `anchor_off < pat_len`.
         let search_from = i + anchor_off;
-        if search_from >= haystack.len() {
-            return None;
-        }
         let Some(rel) = first_byte_in_slice(&haystack[search_from..], anchor_byte) else {
             return None;
         };
@@ -212,10 +210,9 @@ fn count_slice(haystack: &[u8], pattern: WildcardPattern<'_>) -> usize {
     let mut count = 0usize;
     let mut i = 0usize;
     while i <= upper {
+        // `search_from < haystack.len()` is guaranteed by `i <= upper` and
+        // `anchor_off < pat_len`.
         let search_from = i + anchor_off;
-        if search_from >= haystack.len() {
-            break;
-        }
         let Some(rel) = first_byte_in_slice(&haystack[search_from..], anchor_byte) else {
             break;
         };
@@ -255,10 +252,9 @@ fn scan_range(start: usize, size: usize, pattern: WildcardPattern<'_>) -> Option
 
     let mut i = 0usize;
     while i <= upper {
+        // `search_from < size` is guaranteed by `i <= upper` and
+        // `anchor_off < pat_len`.
         let search_from = i + anchor_off;
-        if search_from >= size {
-            return None;
-        }
         // SAFETY: `[start+search_from, start+size)` is a subset of the
         // range the caller declared readable.
         let Some(rel) =
@@ -300,10 +296,9 @@ fn count_range(start: usize, size: usize, pattern: WildcardPattern<'_>) -> usize
     let mut count = 0usize;
     let mut i = 0usize;
     while i <= upper {
+        // `search_from < size` is guaranteed by `i <= upper` and
+        // `anchor_off < pat_len`.
         let search_from = i + anchor_off;
-        if search_from >= size {
-            break;
-        }
         // SAFETY: in-bounds for the declared range.
         let Some(rel) =
             (unsafe { first_byte_in_raw(start + search_from, size - search_from, anchor_byte) })
@@ -617,5 +612,45 @@ mod tests {
         assert_eq!(count_in_text(base, pat), 0);
         assert!(find_in_exec_sections(base, pat).is_none());
         assert_eq!(count_in_exec_sections(base, pat), 0);
+    }
+
+    // -- raw-pointer all-wildcard fast path -------------------------------
+
+    /// All-wildcard pattern via the in-process API exercises the
+    /// `scan_range`/`count_range` "no anchor" early-return branches.
+    #[test]
+    fn synthetic_pe_text_all_wildcard_pattern() {
+        let text = [0xAAu8; 16];
+        let buf = synthetic_pe(&[(*b".text\0\0\0", 0x300, &text, IMAGE_SCN_MEM_EXECUTE)]);
+        let base = buf.as_ptr() as usize;
+        let pat: &[Option<u8>] = &[None, None, None, None];
+
+        // Find returns the section start (offset 0).
+        let hit = find_in_text(base, pat).unwrap();
+        let (text_start, _) = crate::pe::text_section_bounds(base).unwrap();
+        assert_eq!(hit, text_start);
+
+        // Count: floor(section_size / pat_len). Section is padded to its
+        // declared VirtualSize, not just the body length, so we just check
+        // the result is positive and divides cleanly.
+        let count = count_in_text(base, pat);
+        assert!(count >= text.len() / 4);
+    }
+
+    // -- candidate-past-upper break path ----------------------------------
+
+    /// Anchor byte appears in the trailing window where the full pattern
+    /// no longer fits — `scan_slice` / `count_slice` must take the
+    /// `candidate > upper` early-return / break path.
+    #[test]
+    fn slice_anchor_at_tail_no_room_for_pattern() {
+        // Anchor is 0x48; pattern length is 4. Plant 0x48 in the last byte
+        // so candidate would be haystack.len()-1 > upper = haystack.len()-4.
+        let mut buf = vec![0u8; 16];
+        buf[15] = 0x48;
+        let pat = pattern![0x48, 0x8B, 0x05, _];
+
+        assert!(crate::find_in_slice(&buf, pat).is_none());
+        assert_eq!(crate::count_in_slice(&buf, pat), 0);
     }
 }

@@ -38,5 +38,5 @@ jobs:
       uses: Swatinem/rust-cache@v2
 
     - name: Run cargo bench
-      run: cargo bench
+      run: cargo bench --features bench
       shell: bash

@@ -29,6 +29,7 @@ categories = ["os::windows-apis", "memory-management", "no-std"]
 # still implements `Display` via `core::fmt`).
 default = ["std"]
 std = []
+bench = ["dep:criterion"]
 
 [dependencies]
 # Intentionally none. PE header parsing + byte search are pure compute.
@@ -36,7 +37,7 @@ std = []
 # library compiles in well under a second on any platform.
 
 [dev-dependencies]
-criterion = { version = "0.5.1", features = ["html_reports"] }
+criterion = { version = "0.5.1", features = ["html_reports"], optional = true }
 
 [[bench]]
 name = "scan"

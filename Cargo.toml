@@ -29,7 +29,6 @@ categories = ["os::windows-apis", "memory-management", "no-std"]
 # still implements `Display` via `core::fmt`).
 default = ["std"]
 std = []
-bench = ["dep:criterion"]
 
 [dependencies]
 # Intentionally none. PE header parsing + byte search are pure compute.
@@ -37,7 +36,8 @@ bench = ["dep:criterion"]
 # library compiles in well under a second on any platform.
 
 [dev-dependencies]
-criterion = { version = "0.5.1", features = ["html_reports"], optional = true }
+# criterion is intentionally not listed here to keep MSRV at 1.70.
+# Benchmarks are run via the separate bench workflow that adds it temporarily.
 
 [[bench]]
 name = "scan"

@@ -206,6 +206,35 @@ For one-shot offline tools (Ghidra/IDA scripts, sig-dev REPLs), the default
 SWAR path is already 3–6× faster than naive and you can keep the crate
 dependency-free.
 
+## Use Cases
+
+`pe-sigscan` can be used in a wide range of scenarios that require locating
+code or data inside PE modules:
+
+### Game Modding & Internal Tools
+- Finding function addresses to hook in `.text` or other executable sections
+- Signature-based offset scanning (instead of hardcoding addresses)
+- Verifying pattern uniqueness before installing hooks using the `count_*` functions
+
+### Reverse Engineering
+- Quickly locating functions and data structures without relying on debug symbols
+- Building custom signature databases for repeated binary analysis
+- Supporting IDA/Ghidra-style workflows programmatically
+
+### Malware Analysis & Security Research
+- Detecting known malicious code patterns or unpacker stubs
+- Identifying anti-debug, anti-VM, or evasion techniques
+- Automated scanning in sandboxes, analysis pipelines, or security tools
+
+### Development & Debugging Tools
+- Custom memory scanners and runtime debuggers
+- Binary patching and modification utilities
+- Runtime function redirection or hooking frameworks
+
+### Offline Analysis
+- Scanning PE files directly from disk using `find_in_slice` without loading them into memory
+- Useful for static analysis tools and automated signature checkers
+
 ## Why direct memory reads?
 
 The `.text` section of a loaded DLL is page-aligned, RX-protected, and stays

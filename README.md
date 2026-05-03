@@ -3,6 +3,10 @@
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![codecov](https://codecov.io/gh/H0llyW00dzZ/pe-sigscan/graph/badge.svg?token=16K4XYW1LB)](https://codecov.io/gh/H0llyW00dzZ/pe-sigscan)
 
+<p align="center">
+  <img src="assets/image/logo.jpg" alt="pe-sigscan logo" width="280">
+</p>
+
 Fast in-process byte-pattern ("signature") scanning over the executable
 sections of a loaded PE module on Windows.
 

@@ -6,7 +6,7 @@
 
 [package]
 name = "pe-sigscan"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.70"
 authors = ["H0llyW00dzZ"]

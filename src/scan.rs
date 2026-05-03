@@ -326,6 +326,16 @@ fn anchor(pattern: WildcardPattern<'_>) -> Option<(usize, u8)> {
 ///
 /// Returns the matching offset within `haystack` (NOT the absolute
 /// address — callers map to absolute via `haystack.as_ptr() + off`).
+///
+/// `#[inline]` is load-bearing: when `find_in_slice` calls in via
+/// `scan_slice` with the constant `from = 0`, inlining lets LLVM fold
+/// the redundant `haystack.len() < pat_len` and `from > upper` checks
+/// against the caller's pre-validated lengths, restoring the original
+/// pre-refactor codegen on the hot path. Without `#[inline]`, the
+/// inliner is right at its size heuristic and may decline to inline
+/// across both call sites (single-shot vs iterator), costing ~2-3 % on
+/// 1 MiB scans.
+#[inline]
 fn scan_slice_from(haystack: &[u8], from: usize, pattern: WildcardPattern<'_>) -> Option<usize> {
     let pat_len = pattern.len();
     if haystack.len() < pat_len {
@@ -416,6 +426,12 @@ fn count_slice(haystack: &[u8], pattern: WildcardPattern<'_>) -> usize {
 /// the slice variant by Rust's `&[u8]` lifetime + length invariants. The
 /// `i <= upper = size - pat_len` loop invariant ensures every read is
 /// inside the range.
+///
+/// `#[inline]` is load-bearing for the same reason as
+/// [`scan_slice_from`]: with the constant `from = 0` from `find_in_text`
+/// / `find_in_exec_sections` the redundant `from > upper` branch is
+/// statically eliminable by LLVM, but only after inlining.
+#[inline]
 fn scan_range_from(
     start: usize,
     size: usize,

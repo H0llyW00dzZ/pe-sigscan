@@ -65,9 +65,16 @@ jobs:
       if: ${{ matrix.os != 'windows-11-arm' && matrix.rust != '1.70' }}
       run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
 
-    - name: Run tests (no coverage on old Rust / arm runner)
-      if: ${{ matrix.os == 'windows-11-arm' || matrix.rust == '1.70' }}
+    - name: Run tests (no coverage on windows-11-arm)
+      if: ${{ matrix.os == 'windows-11-arm' && matrix.rust != '1.70' }}
       run: cargo test --all-features
+
+    # MSRV check: only verify the library itself compiles on 1.70.
+    # `cargo build` does NOT resolve dev-dependencies, so newer dev-deps
+    # (e.g. criterion's transitive clap_builder) cannot affect this job.
+    - name: MSRV build check
+      if: ${{ matrix.rust == '1.70' }}
+      run: cargo build --all-features --verbose
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v6

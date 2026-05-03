@@ -36,8 +36,10 @@ std = []
 # library compiles in well under a second on any platform.
 
 [dev-dependencies]
-# criterion is intentionally not listed here to keep MSRV at 1.70.
-# Benchmarks are run via the separate bench workflow that adds it temporarily.
+# Only required for `cargo bench`. Pinned to 0.5.1 to keep transitive
+# dependencies compatible with stable Rust toolchains. Note: dev-deps are
+# not resolved by `cargo build`/`cargo check`, so they do not affect MSRV.
+criterion = { version = "0.5.1", features = ["html_reports"] }
 
 [[bench]]
 name = "scan"

@@ -37,9 +37,6 @@ jobs:
     - name: Cache
       uses: Swatinem/rust-cache@v2
 
-    - name: Add criterion temporarily
-      run: cargo add --dev criterion@0.5.1 --features html_reports
-
     - name: Run cargo bench
       run: cargo bench
       shell: bash

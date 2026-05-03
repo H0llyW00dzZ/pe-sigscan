@@ -1,0 +1,45 @@
+# Empty `[workspace]` table marks this crate as the root of its own
+# (single-crate) workspace, isolating it from any parent workspace it
+# might happen to live inside during development. When copied out to a
+# standalone repo this line becomes a harmless no-op — no edits needed.
+[workspace]
+
+[package]
+name = "pe-sigscan"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+authors = ["H0llyW00dzZ"]
+description = "Fast in-process byte-pattern (signature) scanning over the .text and other executable sections of a loaded PE module on Windows. Supports IDA-style wildcard patterns."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/H0llyW00dzZ/pe-sigscan"
+documentation = "https://docs.rs/pe-sigscan"
+readme = "README.md"
+keywords = ["pe", "signature", "scan", "pattern", "windows"]
+categories = ["os::windows-apis", "memory-management", "no-std"]
+
+[lib]
+# Pure-Rust library, no special crate-type. Consumers can pull this into
+# both `dylib`s (game-mod cdylibs) and regular `bin`s (offline analysers).
+
+[features]
+# Default: opt into `std` for `std::error::Error` on `ParsePatternError`.
+# Disable with `default-features = false` to keep the crate fully `no_std`
+# (the only API loss is the `Error` trait impl; the error type itself
+# still implements `Display` via `core::fmt`).
+default = ["std"]
+std = []
+
+[dependencies]
+# Intentionally none. PE header parsing + byte search are pure compute.
+# This keeps the crate's MSRV low and footprint minimal — the entire
+# library compiles in well under a second on any platform.
+
+[dev-dependencies]
+# No external test deps; the test suite uses synthetic PE byte buffers
+# constructed in-test rather than depending on a real DLL on disk.
+
+[lints.clippy]
+# Library code targets a wider audience than `cs2_internal`, so we keep
+# clippy at default-deny for `pedantic` items the rest of the workspace
+# allows. None active right now; placeholder for future tightening.

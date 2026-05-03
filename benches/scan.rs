@@ -93,12 +93,24 @@ fn bench_find_no_hit(c: &mut Criterion) {
 
 /// Same as `find_no_hit` but the pattern is planted near the start, end,
 /// and middle of the haystack to measure early-exit behaviour.
+///
+/// **Latency, not throughput.** This bench deliberately does NOT call
+/// `group.throughput(...)` because `find_in_slice` short-circuits on the
+/// first match — when the match is near the start, only ~1 % of the
+/// buffer is actually read before the scanner returns. Reporting
+/// `bytes_total / elapsed` would yield bogus "925 GiB/s" numbers that
+/// exceed DRAM bandwidth by 10×+ and mislead the reader. The
+/// meaningful metric here is the **wall-clock time** difference
+/// between `start` / `middle` / `end` — a near-linear progression
+/// confirms that early-exit is working, while a flat result would mean
+/// the scanner is incorrectly traversing the full buffer regardless of
+/// match position.
 fn bench_find_hit_position(c: &mut Criterion) {
     let pat = pattern!(0x48, 0x8B, 0x05, _, _, _, _, 0x48);
     let pat_bytes = [0x48, 0x8B, 0x05, 0xAA, 0xBB, 0xCC, 0xDD, 0x48];
     let size = 16 << 20; // 16 MiB
     let mut group = c.benchmark_group("find_hit_position");
-    group.throughput(Throughput::Bytes(size as u64));
+    // No `group.throughput(...)` — see doc comment above.
 
     for &(label, frac) in &[("start", 0.01_f64), ("middle", 0.5_f64), ("end", 0.99_f64)] {
         let mut buf = zero_haystack(size);

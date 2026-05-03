@@ -17,6 +17,20 @@ name: 📊 Benchmarks
 on:
   push:
     branches: [ master ]
+    paths-ignore:
+      - '**/*.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.ignore'
+      - '.github/dependabot.yml'
+  pull_request:
+    branches: [ master ]
+    paths-ignore:
+      - '**/*.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.ignore'
+      - '.github/dependabot.yml'
   workflow_dispatch:
 
 jobs:

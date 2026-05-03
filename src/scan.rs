@@ -653,4 +653,56 @@ mod tests {
         assert!(crate::find_in_slice(&buf, pat).is_none());
         assert_eq!(crate::count_in_slice(&buf, pat), 0);
     }
+
+    /// `scan_slice` natural fall-through path: the anchor pre-filter
+    /// passes at `candidate == upper` but `matches_at` rejects the
+    /// candidate, leaving `i = candidate + 1 > upper` so the while loop
+    /// exits without ever returning, falling through to the trailing
+    /// `None`.
+    #[test]
+    fn slice_find_loop_exhausts_when_last_candidate_fails() {
+        // pat_len = 2, haystack.len() = 4, upper = 2. 0x48 only at index 2.
+        // matches_at(2) fails because byte 3 is 0xFF, not 0x8B.
+        let haystack = [0x00, 0x00, 0x48, 0xFF];
+        let pat = pattern![0x48, 0x8B];
+        assert!(find_in_slice(&haystack, pat).is_none());
+    }
+
+    // -- raw-pointer "anchor matches, full pattern doesn't" ---------------
+
+    /// Forces the in-process `scan_range` / `count_range` scanners through
+    /// the `matches_at == false` branch (raw-pointer `i = candidate + 1`),
+    /// and through the `candidate > upper` break path when the anchor
+    /// hits in the trailing window where the pattern no longer fits.
+    #[test]
+    fn synthetic_pe_text_anchor_match_but_full_pattern_mismatch() {
+        // Anchor 0x48 appears at offset 0 (full pattern fails) and at
+        // offset 4 which is past the upper bound for pat_len = 4 in a
+        // 5-byte body — exercising both `i = candidate + 1` (raw path)
+        // and `candidate > upper` (raw path) in one test.
+        let body = [0x48, 0x00, 0x00, 0x00, 0x48];
+        let buf = synthetic_pe(&[(*b".text\0\0\0", 0x300, &body, IMAGE_SCN_MEM_EXECUTE)]);
+        let base = buf.as_ptr() as usize;
+        let pat = pattern![0x48, 0xAA, 0xBB, 0xCC];
+
+        assert!(find_in_text(base, pat).is_none());
+        assert_eq!(count_in_text(base, pat), 0);
+    }
+
+    /// Companion to the above: anchor matches at exactly `upper` but the
+    /// full pattern doesn't, so `scan_range`'s while loop exits naturally
+    /// via the trailing `None`, and `count_range`'s while loop exits with
+    /// `count == 0`.
+    #[test]
+    fn synthetic_pe_text_anchor_at_upper_then_loop_exhausts() {
+        // pat_len = 4, body.len() = 4, upper = 0. Anchor at 0, full
+        // pattern fails (0x48 OK, 0x00 != 0xAA), i = 1, loop exits.
+        let body = [0x48, 0x00, 0x00, 0x00];
+        let buf = synthetic_pe(&[(*b".text\0\0\0", 0x300, &body, IMAGE_SCN_MEM_EXECUTE)]);
+        let base = buf.as_ptr() as usize;
+        let pat = pattern![0x48, 0xAA, 0xBB, 0xCC];
+
+        assert!(find_in_text(base, pat).is_none());
+        assert_eq!(count_in_text(base, pat), 0);
+    }
 }

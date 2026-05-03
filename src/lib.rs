@@ -41,18 +41,39 @@
 //!
 //! ## Two scanning modes
 //!
-//! - [`find_in_text`] / [`count_in_text`] — walk only the section literally
-//!   named `.text`. The simplest case, suitable for MSVC-built DLLs that put
-//!   everything in one code section.
-//! - [`find_in_exec_sections`] / [`count_in_exec_sections`] — walk every
-//!   section whose `IMAGE_SCN_MEM_EXECUTE` characteristic is set. Required
-//!   when the function you're scanning for might live in a companion section
-//!   like `.text$mn`, `.textbss`, a jump-table arena, or any of the
+//! - [`find_in_text`] / [`count_in_text`] / [`iter_in_text`] — walk only
+//!   the section literally named `.text`. The simplest case, suitable for
+//!   MSVC-built DLLs that put everything in one code section.
+//! - [`find_in_exec_sections`] / [`count_in_exec_sections`] /
+//!   [`iter_in_exec_sections`] — walk every section whose
+//!   `IMAGE_SCN_MEM_EXECUTE` characteristic is set. Required when the
+//!   function you're scanning for might live in a companion section like
+//!   `.text$mn`, `.textbss`, a jump-table arena, or any of the
 //!   optimized-layout code sections that some compilers and linkers emit.
 //!
-//! Both modes have a [`find_in_slice`] / [`count_in_slice`] companion that
-//! works on a `&[u8]` instead of a loaded PE — useful for offline analysis,
-//! unit testing, and scanning extracted bytes.
+//! Both modes have [`find_in_slice`] / [`count_in_slice`] / [`iter_in_slice`]
+//! companions that work on a `&[u8]` instead of a loaded PE — useful for
+//! offline analysis, unit testing, and scanning extracted bytes.
+//!
+//! ## Resolving rel32 displacements
+//!
+//! Real signature workflows almost always end with "match the
+//! instruction, then follow its `rel32` displacement to the actual target
+//! address". The [`resolve_rel32`] / [`resolve_rel32_at`] helpers package
+//! that arithmetic so callers don't reinvent the off-by-one-prone
+//! `next_ip + disp32` calculation:
+//!
+//! ```no_run
+//! use pe_sigscan::{find_in_text, pattern, resolve_rel32_at};
+//! # let module_base = 0usize;
+//!
+//! // mov rax, [rip+disp32]: 48 8B 05 ?? ?? ?? ?? (7 bytes total).
+//! const SIG: &[Option<u8>] = pattern![0x48, 0x8B, 0x05, _, _, _, _];
+//! if let Some(addr) = find_in_text(module_base, SIG) {
+//!     let target = unsafe { resolve_rel32_at(addr, 3, 7) };
+//!     println!("global at {target:#x}");
+//! }
+//! ```
 //!
 //! ## Why direct memory reads?
 //!
@@ -100,15 +121,17 @@ extern crate alloc;
 
 mod error;
 mod fastscan;
+mod instr;
 mod pattern;
 mod pe;
 mod scan;
 
 pub use crate::error::{ParseErrorKind, ParsePatternError};
+pub use crate::instr::{read_rel32, resolve_rel32, resolve_rel32_at};
 pub use crate::pattern::{Pattern, WildcardPattern};
 pub use crate::scan::{
     count_in_exec_sections, count_in_slice, count_in_text, find_in_exec_sections, find_in_slice,
-    find_in_text,
+    find_in_text, iter_in_exec_sections, iter_in_slice, iter_in_text, Matches, SliceMatches,
 };
 
 // ---------------------------------------------------------------------------

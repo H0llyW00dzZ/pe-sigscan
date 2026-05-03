@@ -28,8 +28,16 @@ accessible code by its byte signature.
 - **Hook-install uniqueness**: companion `count_*` functions let you verify
   a pattern matches exactly once before patching, so you never silently
   hook the wrong function.
-- **Slice variants** (`find_in_slice`, `count_in_slice`) for offline
-  analysis and unit testing without a loaded PE.
+- **Streaming iteration**: `iter_in_text`, `iter_in_exec_sections`, and
+  `iter_in_slice` yield every non-overlapping match address lazily, so
+  you can apply per-match filters or patch many call sites in a single
+  pass without rolling a manual scan loop.
+- **rel32 helpers**: `resolve_rel32` / `resolve_rel32_at` package the
+  off-by-one-prone `next_ip + disp32` arithmetic that follows nearly
+  every signature match in x64 code (RIP-relative `mov`, `call rel32`,
+  `jmp rel32`).
+- **Slice variants** (`find_in_slice`, `count_in_slice`, `iter_in_slice`)
+  for offline analysis and unit testing without a loaded PE.
 - **Direct memory reads** (no `ReadProcessMemory` round-trip per byte) —
   suitable for scanning tens of megabytes of `.text` in well under a
   second.
@@ -83,6 +91,57 @@ use pe_sigscan::pattern;
 // `_` is the wildcard token; bytes use 0xNN literals.
 const SIG: &[Option<u8>] = pattern![0x48, 0x8B, _, _, 0x48, 0x89];
 ```
+
+### Iterating over every match
+
+When a single pattern intentionally matches multiple call sites (e.g.
+patching every `call HeapAlloc`, or logging every reference to a
+particular global), use the iterator variants:
+
+```rust,no_run
+use pe_sigscan::{iter_in_text, pattern};
+# let module_base: usize = 0;
+
+const HOOK_TARGETS: &[Option<u8>] = pattern![0xE8, _, _, _, _]; // call rel32
+
+for addr in iter_in_text(module_base, HOOK_TARGETS) {
+    println!("call site at {addr:#x}");
+    // … install hook, log, or rewrite at `addr`
+}
+```
+
+Iterators yield non-overlapping matches (after a hit at offset `i` the
+next probe starts at `i + pattern.len()`), so
+`iter_in_text(..).count()` always equals `count_in_text(..)`.
+
+### Resolving rel32 displacements
+
+After matching an instruction whose target is a 32-bit RIP-relative
+displacement, the next step is almost always "follow the displacement to
+its absolute target". `resolve_rel32_at` packages that calculation:
+
+```rust,no_run
+use pe_sigscan::{find_in_text, pattern, resolve_rel32_at};
+# let module_base: usize = 0;
+
+// mov rax, [rip+disp32]: 48 8B 05 ?? ?? ?? ?? — disp at +3, instr len 7.
+const SIG: &[Option<u8>] = pattern![0x48, 0x8B, 0x05, _, _, _, _];
+if let Some(addr) = find_in_text(module_base, SIG) {
+    let target = unsafe { resolve_rel32_at(addr, 3, 7) };
+    println!("global at {target:#x}");
+}
+```
+
+| Instruction          | Bytes (anchor + disp)        | `rel32_offset` | `instr_len` |
+| -------------------- | ---------------------------- | -------------- | ----------- |
+| `mov rax, [rip+d32]` | `48 8B 05 ?? ?? ?? ??`       | 3              | 7           |
+| `lea rax, [rip+d32]` | `48 8D 05 ?? ?? ?? ??`       | 3              | 7           |
+| `call rel32`         | `E8 ?? ?? ?? ??`             | 1              | 5           |
+| `jmp rel32`          | `E9 ?? ?? ?? ??`             | 1              | 5           |
+| `jcc rel32`          | `0F 8x ?? ?? ?? ??`          | 2              | 6           |
+
+For offline analysis (no loaded PE), `read_rel32(&bytes, offset)` is the
+safe slice equivalent that returns the raw `i32` displacement.
 
 ### Verifying uniqueness before installing a hook
 

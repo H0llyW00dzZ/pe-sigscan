@@ -59,14 +59,14 @@ jobs:
       uses: taiki-e/install-action@v2
       with:
         tool: cargo-llvm-cov
-      if: ${{ matrix.os != 'windows-11-arm' }}
+      if: ${{ matrix.os != 'windows-11-arm' && matrix.rust != '1.70' }}
 
     - name: Run tests with coverage
-      if: ${{ matrix.os != 'windows-11-arm' }}
+      if: ${{ matrix.os != 'windows-11-arm' && matrix.rust != '1.70' }}
       run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
 
-    - name: Run tests (no coverage on this runner)
-      if: ${{ matrix.os == 'windows-11-arm' }}
+    - name: Run tests (no coverage on old Rust / arm runner)
+      if: ${{ matrix.os == 'windows-11-arm' || matrix.rust == '1.70' }}
       run: cargo test --all-features
 
     - name: Upload coverage to Codecov

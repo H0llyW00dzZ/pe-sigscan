@@ -21,9 +21,7 @@
 //! across haystack sizes — a 1 MiB scan and a 64 MiB scan should show the
 //! same GB/s when the inner loop is the bottleneck.
 
-use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use pe_sigscan::{count_in_slice, find_in_slice, pattern};
 
 // ----------------------------------------------------------------------
@@ -77,18 +75,14 @@ fn bench_find_no_hit(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(size as u64));
 
         let zero = zero_haystack(size);
-        group.bench_with_input(
-            BenchmarkId::new("zero", size),
-            &zero,
-            |b, h| b.iter(|| find_in_slice(black_box(h), black_box(pat))),
-        );
+        group.bench_with_input(BenchmarkId::new("zero", size), &zero, |b, h| {
+            b.iter(|| find_in_slice(black_box(h), black_box(pat)))
+        });
 
         let rand = random_haystack(size, 0xDEAD_BEEF);
-        group.bench_with_input(
-            BenchmarkId::new("random", size),
-            &rand,
-            |b, h| b.iter(|| find_in_slice(black_box(h), black_box(pat))),
-        );
+        group.bench_with_input(BenchmarkId::new("random", size), &rand, |b, h| {
+            b.iter(|| find_in_slice(black_box(h), black_box(pat)))
+        });
     }
 
     group.finish();
@@ -125,18 +119,14 @@ fn bench_count(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(size as u64));
 
         let zero = zero_haystack(size);
-        group.bench_with_input(
-            BenchmarkId::new("zero", size),
-            &zero,
-            |b, h| b.iter(|| count_in_slice(black_box(h), black_box(pat))),
-        );
+        group.bench_with_input(BenchmarkId::new("zero", size), &zero, |b, h| {
+            b.iter(|| count_in_slice(black_box(h), black_box(pat)))
+        });
 
         let rand = random_haystack(size, 0xCAFE_BABE);
-        group.bench_with_input(
-            BenchmarkId::new("random", size),
-            &rand,
-            |b, h| b.iter(|| count_in_slice(black_box(h), black_box(pat))),
-        );
+        group.bench_with_input(BenchmarkId::new("random", size), &rand, |b, h| {
+            b.iter(|| count_in_slice(black_box(h), black_box(pat)))
+        });
     }
 
     group.finish();
@@ -155,17 +145,21 @@ fn bench_pattern_length(c: &mut Criterion) {
     let p4: &[Option<u8>] = pattern!(0x48, 0x8B, _, _);
     let p8: &[Option<u8>] = pattern!(0x48, 0x8B, 0x05, _, _, _, _, 0x48);
     let p20: &[Option<u8>] = pattern!(
-        0x48, 0x89, 0x5C, 0x24, _, 0x48, 0x89, 0x74, 0x24, _, 0x48, 0x89, 0x7C,
-        0x24, _, 0x55, 0x41, 0x56, 0x41, 0x57
+        0x48, 0x89, 0x5C, 0x24, _, 0x48, 0x89, 0x74, 0x24, _, 0x48, 0x89, 0x7C, 0x24, _, 0x55,
+        0x41, 0x56, 0x41, 0x57
     );
     let p40: &[Option<u8>] = pattern!(
-        0x48, 0x89, 0x5C, 0x24, _, 0x48, 0x89, 0x74, 0x24, _, 0x48, 0x89, 0x7C,
-        0x24, _, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x40, 0x48,
-        0x8B, 0xF1, 0x48, 0x8B, 0xFA, 0x49, 0x8B, 0xD8, _, _, _, _, 0x48, 0x8B,
-        0xCB
+        0x48, 0x89, 0x5C, 0x24, _, 0x48, 0x89, 0x74, 0x24, _, 0x48, 0x89, 0x7C, 0x24, _, 0x55,
+        0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x40, 0x48, 0x8B, 0xF1, 0x48, 0x8B, 0xFA, 0x49,
+        0x8B, 0xD8, _, _, _, _, 0x48, 0x8B, 0xCB
     );
 
-    for (label, p) in [("len_4", p4), ("len_8", p8), ("len_20", p20), ("len_40", p40)] {
+    for (label, p) in [
+        ("len_4", p4),
+        ("len_8", p8),
+        ("len_20", p20),
+        ("len_40", p40),
+    ] {
         group.bench_with_input(BenchmarkId::from_parameter(label), &p, |b, &pp| {
             b.iter(|| find_in_slice(black_box(&haystack), black_box(pp)))
         });

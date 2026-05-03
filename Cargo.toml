@@ -15,7 +15,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/H0llyW00dzZ/pe-sigscan"
 documentation = "https://docs.rs/pe-sigscan"
 readme = "README.md"
-keywords = ["pe", "signature", "scan", "pattern", "windows, "reverse-engineering", "reverse-engineering-tools", "ida"]
+keywords = ["pe", "signature", "scan", "pattern", "windows", "reverse-engineering", "reverse-engineering-tools", "ida"]
 categories = ["os::windows-apis", "memory-management", "no-std"]
 
 [lib]

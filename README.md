@@ -2,6 +2,8 @@
 
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![codecov](https://codecov.io/gh/H0llyW00dzZ/pe-sigscan/graph/badge.svg?token=16K4XYW1LB)](https://codecov.io/gh/H0llyW00dzZ/pe-sigscan)
+[![Crates.io](https://img.shields.io/crates/v/pe-sigscan.svg)](https://crates.io/crates/pe-sigscan)
+[![Documentation](https://docs.rs/pe-sigscan/badge.svg)](https://docs.rs/pe-sigscan)
 
 <p align="center">
   <img src="assets/image/logo.jpg" alt="pe-sigscan logo" width="280">

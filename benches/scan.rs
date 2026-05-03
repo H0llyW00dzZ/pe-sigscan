@@ -151,10 +151,22 @@ fn bench_count(c: &mut Criterion) {
 /// candidate; longer patterns make `matches_at` cost more on the hits
 /// the anchor lets through, so this is most visible on `random` content
 /// where the anchor byte hits often.
+///
+/// Uses `count_in_slice` rather than `find_in_slice` because `count`
+/// always traverses the full haystack regardless of pattern content,
+/// while `find` early-exits on the first match. With a `random`
+/// haystack and a short pattern (e.g. `len_4` with 2 fixed bytes), a
+/// chance match lands at ~64 KiB into the buffer and `find` returns
+/// after reading 1 % of the bytes — making `Throughput::Bytes(size)`
+/// report bogus 3000+ GiB/s numbers (faster than DRAM bandwidth) that
+/// aren't comparable across pattern lengths. `count` keeps the work
+/// constant per pattern-length variant so the throughput axis stays
+/// honest and the only thing varying is the per-anchor-hit
+/// `matches_at` cost we actually want to measure.
 fn bench_pattern_length(c: &mut Criterion) {
     let size = 8 << 20; // 8 MiB
     let haystack = random_haystack(size, 0x1234_5678);
-    let mut group = c.benchmark_group("find_pattern_length");
+    let mut group = c.benchmark_group("count_pattern_length");
     group.throughput(Throughput::Bytes(size as u64));
 
     let p4: &[Option<u8>] = pattern!(0x48, 0x8B, _, _);
@@ -176,7 +188,7 @@ fn bench_pattern_length(c: &mut Criterion) {
         ("len_40", p40),
     ] {
         group.bench_with_input(BenchmarkId::from_parameter(label), &p, |b, &pp| {
-            b.iter(|| find_in_slice(black_box(&haystack), black_box(pp)))
+            b.iter(|| count_in_slice(black_box(&haystack), black_box(pp)))
         });
     }
 

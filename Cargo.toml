@@ -36,7 +36,7 @@ std = []
 # library compiles in well under a second on any platform.
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.5.1", features = ["html_reports"] }
 
 [[bench]]
 name = "scan"

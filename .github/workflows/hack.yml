@@ -36,11 +36,12 @@ jobs:
   coverage:
     name: 🔢 Test Coverage on ${{ matrix.os }} (Rust ${{ matrix.rust }})
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.rust == 'nightly' }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, ubuntu-22.04, ubuntu-24.04-arm, ubuntu-22.04-arm, macos-latest, windows-latest, windows-2022, windows-11-arm]
-        rust: [stable, beta, '1.70']
+        rust: [stable, beta, nightly, '1.70']
 
     steps:
     - name: Checkout code

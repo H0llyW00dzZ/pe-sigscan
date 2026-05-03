@@ -201,10 +201,11 @@ fn count_slice(haystack: &[u8], pattern: WildcardPattern<'_>) -> usize {
     let pat_len = pattern.len();
     let upper = haystack.len() - pat_len;
     let Some((anchor_off, anchor_byte)) = anchor(pattern) else {
-        // All-wildcard pattern: every position matches; non-overlapping
-        // count = floor(len / pat_len) + 1 for the trailing zero-length
-        // match. We mirror the byte-by-byte semantics: stride = pat_len.
-        return haystack.len() / pat_len.max(1);
+        // All-wildcard pattern: every position matches; the byte-by-byte
+        // semantics stride by `pat_len` for non-overlap, so the count is
+        // `floor(haystack.len() / pat_len)`. `pat_len >= 1` is guaranteed
+        // by the public-entry check at the top of `count_in_slice`.
+        return haystack.len() / pat_len;
     };
 
     let mut count = 0usize;
@@ -290,7 +291,9 @@ fn count_range(start: usize, size: usize, pattern: WildcardPattern<'_>) -> usize
     }
     let upper = size - pat_len;
     let Some((anchor_off, anchor_byte)) = anchor(pattern) else {
-        return size / pat_len.max(1);
+        // All-wildcard pattern; same reasoning as `count_slice`. `pat_len
+        // >= 1` is guaranteed by the public-entry caller.
+        return size / pat_len;
     };
 
     let mut count = 0usize;

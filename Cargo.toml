@@ -36,8 +36,11 @@ std = []
 # library compiles in well under a second on any platform.
 
 [dev-dependencies]
-# No external test deps; the test suite uses synthetic PE byte buffers
-# constructed in-test rather than depending on a real DLL on disk.
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "scan"
+harness = false
 
 [lints.clippy]
 # Library code targets a wider audience than `cs2_internal`, so we keep

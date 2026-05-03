@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-.PHONY: all header build test fmt clippy clean
+.PHONY: all header build test fmt clippy clean bench
 
 # Print ASCII art banner.
 ifeq ($(OS),Windows_NT)
@@ -22,7 +22,7 @@ header:
 	@echo   ^| '_ \ / _ \_____ / _^| ^|/ _` / __^|/ __/ _` ^| '_ \  
 	@echo   ^| ^|_^) ^|  __/_____\__ \ ^| ^(_^| \__ \ ^(_^| ^(_^| ^| ^| ^| ^| 
 	@echo   ^| .__/ \___^|     ^|___/_^|\__, ^|___/\___\__,_^|_^| ^|_^| 
-	@echo   ^|_^|                     ^|___/                      
+	@echo   ^|_^|                     ^|___/ 
 	@echo.
 	@echo   pe-sigscan by H0llyW00dzZ ^(@github.com/H0llyW00dzZ^)
 	@echo.
@@ -70,4 +70,10 @@ clippy: header
 clean: header
 	@echo :: Cleaning...
 	cargo clean
+	@echo :: Done.
+
+# Run benchmarks (requires criterion)
+bench: header
+	@echo :: Running benchmarks...
+	cargo bench
 	@echo :: Done.

@@ -22,7 +22,10 @@
 //! same GB/s when the inner loop is the bottleneck.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use pe_sigscan::{count_in_slice, find_in_slice, pattern};
+use pe_sigscan::{
+    count_in_slice, find_in_slice, iter_in_slice, pattern, read_rel32, resolve_rel32,
+    resolve_rel32_at,
+};
 
 // ----------------------------------------------------------------------
 // Haystack generators
@@ -168,11 +171,251 @@ fn bench_pattern_length(c: &mut Criterion) {
     group.finish();
 }
 
+// ----------------------------------------------------------------------
+// Iterator benchmarks (iter_in_slice)
+// ----------------------------------------------------------------------
+
+/// Compare iterator-driven match enumeration against the dedicated
+/// single-shot scanners. The iterator is built on the same
+/// `scan_slice_from` / `scan_range_from` primitives, so:
+///
+/// - `iter_in_slice(..).count()` should track `count_in_slice(..)` to
+///   within noise on the same content.
+/// - `iter_in_slice(..).next()` should track `find_in_slice(..)`.
+///
+/// A measurable gap on either pair points at unintended overhead in the
+/// iterator state machine (cursor / `pat_len == 0` short-circuits, etc.)
+/// and is the signal to dig in.
+fn bench_iter_in_slice(c: &mut Criterion) {
+    // 8 MiB random haystack — anchor byte (0x48) hits ~32k times, of
+    // which only a handful pass the full pattern check. Realistic for a
+    // signature with one wildcard.
+    let size = 8 << 20;
+    let buf = random_haystack(size, 0xBABE_FACE);
+    let pat = pattern!(0x48, 0x8B, 0x05, _, _, _, _, 0x48);
+
+    let mut group = c.benchmark_group("iter_in_slice");
+    group.throughput(Throughput::Bytes(size as u64));
+
+    // -- "walk every match" forms ----------------------------------------
+    group.bench_function("iter_count", |b| {
+        b.iter(|| iter_in_slice(black_box(&buf), black_box(pat)).count())
+    });
+    group.bench_function("count_in_slice (reference)", |b| {
+        b.iter(|| count_in_slice(black_box(&buf), black_box(pat)))
+    });
+
+    // -- "first match only" forms ----------------------------------------
+    group.bench_function("iter_next", |b| {
+        b.iter(|| iter_in_slice(black_box(&buf), black_box(pat)).next())
+    });
+    group.bench_function("find_in_slice (reference)", |b| {
+        b.iter(|| find_in_slice(black_box(&buf), black_box(pat)))
+    });
+
+    group.finish();
+}
+
+/// Iterator throughput as a function of match density. As more matches
+/// land in the haystack the per-match overhead (cursor advance, return
+/// from `next()`, caller-side accumulation) starts to bite. This bench
+/// quantifies that.
+///
+/// At sparse densities the bench should be I/O-bound (anchor pre-filter
+/// dominates); at dense densities it transitions to overhead-bound.
+fn bench_iter_match_density(c: &mut Criterion) {
+    let size = 8 << 20;
+    let pat_bytes = [0x48, 0x8B, 0x05, 0xAA, 0xBB, 0xCC, 0xDD, 0x48];
+    let pat = pattern!(0x48, 0x8B, 0x05, _, _, _, _, 0x48);
+
+    let mut group = c.benchmark_group("iter_match_density");
+    group.throughput(Throughput::Bytes(size as u64));
+
+    for &n_matches in &[1usize, 16, 256, 4096] {
+        let mut buf = zero_haystack(size);
+        // Spread matches uniformly across the haystack.
+        let stride = size / (n_matches + 1);
+        for i in 0..n_matches {
+            let off = (stride * (i + 1)).min(size - pat_bytes.len());
+            plant(&mut buf, off, &pat_bytes);
+        }
+        group.bench_with_input(BenchmarkId::from_parameter(n_matches), &buf, |b, h| {
+            b.iter(|| {
+                let mut acc = 0usize;
+                for addr in iter_in_slice(black_box(h), black_box(pat)) {
+                    acc = acc.wrapping_add(addr);
+                }
+                black_box(acc)
+            })
+        });
+    }
+
+    group.finish();
+}
+
+// ----------------------------------------------------------------------
+// rel32 helper benchmarks
+// ----------------------------------------------------------------------
+
+/// Build a buffer of `n` synthetic `call rel32` instructions
+/// (`E8 ?? ?? ?? ??`) packed back-to-back. Used to drive the rel32
+/// helpers in a tight loop without the noise of an outer scan.
+fn synthetic_call_buffer(n: usize) -> Vec<u8> {
+    const INSTR_LEN: usize = 5;
+    let mut buf = vec![0u8; n * INSTR_LEN];
+    for i in 0..n {
+        let off = i * INSTR_LEN;
+        buf[off] = 0xE8;
+        // Vary the displacement so the compiler can't constant-fold the
+        // resolved targets across iterations.
+        let disp = (i as i32).wrapping_mul(0x0101_0101);
+        buf[off + 1..off + INSTR_LEN].copy_from_slice(&disp.to_le_bytes());
+    }
+    buf
+}
+
+/// Throughput of the rel32 helpers in isolation. These are a few
+/// instructions each (load + sign-extend + add); the loop itself
+/// dominates, so the absolute number measures `resolve_rel32` + ~3 ALU
+/// ops of bookkeeping per iteration. Useful to watch for regressions
+/// (e.g. accidentally introducing a branch or losing the inline).
+fn bench_rel32_helpers(c: &mut Criterion) {
+    const N: usize = 1 << 16; // 65,536 instructions
+    const INSTR_LEN: usize = 5;
+    let buf = synthetic_call_buffer(N);
+    let base = buf.as_ptr() as usize;
+
+    let mut group = c.benchmark_group("rel32_helpers");
+    group.throughput(Throughput::Elements(N as u64));
+
+    // resolve_rel32: raw 2-arg form.
+    group.bench_function("resolve_rel32", |b| {
+        b.iter(|| {
+            let mut acc: usize = 0;
+            for i in 0..N {
+                let addr = base + i * INSTR_LEN;
+                acc = acc.wrapping_add(unsafe {
+                    resolve_rel32(black_box(addr + 1), black_box(addr + INSTR_LEN))
+                });
+            }
+            black_box(acc)
+        })
+    });
+
+    // resolve_rel32_at: convenience wrapper. Should compile down to the
+    // exact same code as `resolve_rel32` after inlining.
+    group.bench_function("resolve_rel32_at", |b| {
+        b.iter(|| {
+            let mut acc: usize = 0;
+            for i in 0..N {
+                let addr = base + i * INSTR_LEN;
+                acc = acc.wrapping_add(unsafe { resolve_rel32_at(black_box(addr), 1, INSTR_LEN) });
+            }
+            black_box(acc)
+        })
+    });
+
+    // read_rel32: safe slice variant. Slightly more expensive due to
+    // bounds-checking, but still single-load on the happy path.
+    group.bench_function("read_rel32", |b| {
+        b.iter(|| {
+            let mut acc: i64 = 0;
+            for i in 0..N {
+                let off = i * INSTR_LEN;
+                acc = acc.wrapping_add(read_rel32(black_box(&buf), off + 1).unwrap_or(0) as i64);
+            }
+            black_box(acc)
+        })
+    });
+
+    group.finish();
+}
+
+// ----------------------------------------------------------------------
+// End-to-end "scan + resolve" workflow
+// ----------------------------------------------------------------------
+
+/// The realistic cheat / mod-loader pipeline: scan a `.text`-sized
+/// haystack for an instruction signature, then for each match resolve
+/// the rel32 displacement to its absolute target.
+///
+/// Benchmarked alongside a "scan-only" baseline so the per-match
+/// resolution overhead is visible against the scan cost. In practice the
+/// scan dominates by 3+ orders of magnitude on real binaries — this
+/// bench confirms that.
+fn bench_scan_and_resolve(c: &mut Criterion) {
+    // 8 MiB random haystack with 64 planted call instructions, evenly
+    // spread. Anchor byte (0xE8) appears more often than in a real
+    // binary because the random distribution puts it ~1/256 offsets, so
+    // this is a slight pessimisation of the iterator path — fine; it
+    // gives a clean upper bound on overhead.
+    let size = 8 << 20;
+    let mut buf = random_haystack(size, 0x9999_AAAA);
+    let pat_bytes = [0xE8, 0x78, 0x56, 0x34, 0x12];
+    let n_planted = 64;
+    let stride = size / (n_planted + 1);
+    for i in 0..n_planted {
+        let off = (stride * (i + 1)).min(size - pat_bytes.len());
+        plant(&mut buf, off, &pat_bytes);
+    }
+    let pat = pattern!(0xE8, _, _, _, _);
+
+    let mut group = c.benchmark_group("scan_and_resolve");
+    group.throughput(Throughput::Bytes(size as u64));
+
+    // Scan only — establishes the baseline cost of walking the haystack.
+    group.bench_function("iter_only", |b| {
+        b.iter(|| {
+            let mut acc: usize = 0;
+            for addr in iter_in_slice(black_box(&buf), black_box(pat)) {
+                acc = acc.wrapping_add(addr);
+            }
+            black_box(acc)
+        })
+    });
+
+    // Scan + resolve every match — the realistic workflow used by
+    // hookers / cheats / anti-cheat-aware analysers.
+    group.bench_function("iter_then_resolve_rel32_at", |b| {
+        b.iter(|| {
+            let mut acc: usize = 0;
+            for addr in iter_in_slice(black_box(&buf), black_box(pat)) {
+                acc = acc.wrapping_add(unsafe { resolve_rel32_at(addr, 1, 5) });
+            }
+            black_box(acc)
+        })
+    });
+
+    // Same workflow but using the safe `read_rel32` slice helper to do
+    // the displacement read. Includes the bounds check on every match.
+    // The base address used for the absolute-address arithmetic is the
+    // slice's start — equivalent to what the in-process variant does
+    // with `module_base` at runtime.
+    group.bench_function("iter_then_read_rel32", |b| {
+        let base = buf.as_ptr() as usize;
+        b.iter(|| {
+            let mut acc: usize = 0;
+            for addr in iter_in_slice(black_box(&buf), black_box(pat)) {
+                let off = addr - base;
+                let disp = read_rel32(black_box(&buf), off + 1).unwrap_or(0) as isize;
+                acc = acc.wrapping_add(((addr + 5) as isize).wrapping_add(disp) as usize);
+            }
+            black_box(acc)
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_find_no_hit,
     bench_find_hit_position,
     bench_count,
-    bench_pattern_length
+    bench_pattern_length,
+    bench_iter_in_slice,
+    bench_iter_match_density,
+    bench_rel32_helpers,
+    bench_scan_and_resolve,
 );
 criterion_main!(benches);

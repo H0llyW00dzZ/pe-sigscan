@@ -30,10 +30,22 @@ categories = ["os::windows-apis", "memory-management", "no-std"]
 default = ["std"]
 std = []
 
+# Optional: use the `memchr` crate for SIMD-accelerated first-byte search.
+# Without this feature the scanner falls back to a portable SWAR (8-byte
+# chunked) search written in pure no_std Rust. Both paths are correct;
+# `memchr` is just faster on hot paths in benchmarks.
+memchr = ["dep:memchr"]
+
 [dependencies]
-# Intentionally none. PE header parsing + byte search are pure compute.
-# This keeps the crate's MSRV low and footprint minimal — the entire
+# Intentionally none by default. PE header parsing + byte search are pure
+# compute. Keeping the crate's MSRV low and footprint minimal — the entire
 # library compiles in well under a second on any platform.
+#
+# `memchr` is gated behind the optional `memchr` feature: enabling it gives
+# a SIMD-accelerated first-byte search on x86_64 and aarch64 when the
+# scanner is run against a `&[u8]` slice (the in-process raw-pointer path
+# always uses the portable SWAR fallback).
+memchr = { version = "2", default-features = false, features = ["alloc"], optional = true }
 
 [dev-dependencies]
 # Only required for `cargo bench`. Pinned to 0.5.1 to keep transitive

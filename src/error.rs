@@ -34,7 +34,11 @@ impl core::fmt::Display for ParsePatternError {
         match self.kind {
             ParseErrorKind::Empty => write!(f, "pattern string contained no tokens"),
             ParseErrorKind::InvalidLength => {
-                write!(f, "token #{} must be two hex digits or `?` / `??`", self.token_index)
+                write!(
+                    f,
+                    "token #{} must be two hex digits or `?` / `??`",
+                    self.token_index
+                )
             }
             ParseErrorKind::InvalidHexDigit => {
                 write!(f, "token #{} contains a non-hex digit", self.token_index)

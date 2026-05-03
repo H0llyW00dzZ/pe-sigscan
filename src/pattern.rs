@@ -82,15 +82,18 @@ impl Pattern {
         for (idx, tok) in s.split_ascii_whitespace().enumerate() {
             let entry = match tok {
                 "?" | "??" => None,
-                _ => Some(
-                    parse_hex_byte(tok)
-                        .map_err(|kind| ParsePatternError { token_index: idx, kind })?,
-                ),
+                _ => Some(parse_hex_byte(tok).map_err(|kind| ParsePatternError {
+                    token_index: idx,
+                    kind,
+                })?),
             };
             bytes.push(entry);
         }
         if bytes.is_empty() {
-            return Err(ParsePatternError { token_index: 0, kind: ParseErrorKind::Empty });
+            return Err(ParsePatternError {
+                token_index: 0,
+                kind: ParseErrorKind::Empty,
+            });
         }
         Ok(Self { bytes })
     }

@@ -16,6 +16,7 @@
 //! [`matches_at`]. For typical signatures this skips ~99% of candidate
 //! offsets without paying the per-byte loop cost.
 
+use crate::fastscan::{first_byte_in_raw, first_byte_in_slice};
 use crate::pattern::WildcardPattern;
 use crate::pe::{exec_sections, text_section_bounds};
 
@@ -88,10 +89,7 @@ pub fn count_in_text(module_base: usize, pattern: WildcardPattern<'_>) -> usize 
 /// filter is dropped in favour of an `IMAGE_SCN_MEM_EXECUTE`
 /// characteristic check.
 #[must_use]
-pub fn find_in_exec_sections(
-    module_base: usize,
-    pattern: WildcardPattern<'_>,
-) -> Option<usize> {
+pub fn find_in_exec_sections(module_base: usize, pattern: WildcardPattern<'_>) -> Option<usize> {
     if module_base == 0 || pattern.is_empty() {
         return None;
     }
@@ -136,7 +134,7 @@ pub fn find_in_slice(haystack: &[u8], pattern: WildcardPattern<'_>) -> Option<us
     if pattern.is_empty() || haystack.len() < pattern.len() {
         return None;
     }
-    scan_range(haystack.as_ptr() as usize, haystack.len(), pattern)
+    scan_slice(haystack, pattern).map(|off| haystack.as_ptr() as usize + off)
 }
 
 /// Count occurrences of `pattern` within the slice `haystack`. Non-
@@ -147,10 +145,94 @@ pub fn count_in_slice(haystack: &[u8], pattern: WildcardPattern<'_>) -> usize {
     if pattern.is_empty() || haystack.len() < pattern.len() {
         return 0;
     }
-    count_range(haystack.as_ptr() as usize, haystack.len(), pattern)
+    count_slice(haystack, pattern)
 }
 
-/// Scan a single contiguous byte range for the first match.
+/// Locate the first non-wildcard byte in the pattern. Returns the
+/// (offset_within_pattern, byte_value) pair, or `None` if the pattern is
+/// all wildcards (in which case the anchor pre-filter must be skipped).
+#[inline]
+fn anchor(pattern: WildcardPattern<'_>) -> Option<(usize, u8)> {
+    pattern
+        .iter()
+        .enumerate()
+        .find_map(|(i, b)| b.map(|byte| (i, byte)))
+}
+
+/// Slice-native scan for the first match.
+///
+/// Uses [`first_byte_in_slice`] to skip directly to the next plausible
+/// candidate offset instead of stepping byte-by-byte. On haystacks where
+/// the anchor byte is rare this is dramatically faster than
+/// [`scan_range`].
+fn scan_slice(haystack: &[u8], pattern: WildcardPattern<'_>) -> Option<usize> {
+    let pat_len = pattern.len();
+    let upper = haystack.len() - pat_len; // safe: caller checked length
+    let Some((anchor_off, anchor_byte)) = anchor(pattern) else {
+        // All-wildcard pattern matches at offset 0.
+        return Some(0);
+    };
+
+    let mut i = 0usize;
+    while i <= upper {
+        // Search for the anchor byte starting from the current candidate
+        // offset (offset by `anchor_off` so the byte we find lines up
+        // correctly with the pattern). `search_from < haystack.len()` is
+        // guaranteed by `i <= upper` and `anchor_off < pat_len`.
+        let search_from = i + anchor_off;
+        let Some(rel) = first_byte_in_slice(&haystack[search_from..], anchor_byte) else {
+            return None;
+        };
+        let candidate = search_from + rel - anchor_off;
+        if candidate > upper {
+            return None;
+        }
+        // SAFETY: `candidate + pat_len <= haystack.len()` by `candidate <= upper`.
+        if unsafe { matches_at(haystack.as_ptr() as usize + candidate, pattern) } {
+            return Some(candidate);
+        }
+        i = candidate + 1;
+    }
+    None
+}
+
+/// Slice-native count of non-overlapping matches.
+fn count_slice(haystack: &[u8], pattern: WildcardPattern<'_>) -> usize {
+    let pat_len = pattern.len();
+    let upper = haystack.len() - pat_len;
+    let Some((anchor_off, anchor_byte)) = anchor(pattern) else {
+        // All-wildcard pattern: every position matches; the byte-by-byte
+        // semantics stride by `pat_len` for non-overlap, so the count is
+        // `floor(haystack.len() / pat_len)`. `pat_len >= 1` is guaranteed
+        // by the public-entry check at the top of `count_in_slice`.
+        return haystack.len() / pat_len;
+    };
+
+    let mut count = 0usize;
+    let mut i = 0usize;
+    while i <= upper {
+        // `search_from < haystack.len()` is guaranteed by `i <= upper` and
+        // `anchor_off < pat_len`.
+        let search_from = i + anchor_off;
+        let Some(rel) = first_byte_in_slice(&haystack[search_from..], anchor_byte) else {
+            break;
+        };
+        let candidate = search_from + rel - anchor_off;
+        if candidate > upper {
+            break;
+        }
+        // SAFETY: in-bounds by the same invariant.
+        if unsafe { matches_at(haystack.as_ptr() as usize + candidate, pattern) } {
+            count += 1;
+            i = candidate + pat_len;
+        } else {
+            i = candidate + 1;
+        }
+    }
+    count
+}
+
+/// Scan a single contiguous raw byte range for the first match.
 ///
 /// # Safety contract for the unsafe pointer reads
 ///
@@ -165,34 +247,38 @@ fn scan_range(start: usize, size: usize, pattern: WildcardPattern<'_>) -> Option
         return None;
     }
     let upper = size - pat_len;
-    let (anchor_off, anchor_byte) = pattern
-        .iter()
-        .enumerate()
-        .find_map(|(i, b)| b.map(|byte| (i, byte)))
-        .unwrap_or((0, 0));
-    let has_anchor = pattern.iter().any(|b| b.is_some());
+    let Some((anchor_off, anchor_byte)) = anchor(pattern) else {
+        return Some(start);
+    };
 
     let mut i = 0usize;
     while i <= upper {
-        let addr = start + i;
-        if has_anchor {
-            // SAFETY: addr + anchor_off < start + size by the loop invariant.
-            let candidate = unsafe { *((addr + anchor_off) as *const u8) };
-            if candidate != anchor_byte {
-                i += 1;
-                continue;
-            }
+        // `search_from < size` is guaranteed by `i <= upper` and
+        // `anchor_off < pat_len`.
+        let search_from = i + anchor_off;
+        // SAFETY: `[start+search_from, start+size)` is a subset of the
+        // range the caller declared readable.
+        let Some(rel) =
+            (unsafe { first_byte_in_raw(start + search_from, size - search_from, anchor_byte) })
+        else {
+            return None;
+        };
+        let candidate = search_from + rel - anchor_off;
+        if candidate > upper {
+            return None;
         }
+        let addr = start + candidate;
         // SAFETY: bounds upheld by the same invariant.
         if unsafe { matches_at(addr, pattern) } {
             return Some(addr);
         }
-        i += 1;
+        i = candidate + 1;
     }
     None
 }
 
-/// Count occurrences of `pattern` within a single contiguous byte range.
+/// Count occurrences of `pattern` within a single contiguous raw byte
+/// range.
 ///
 /// Counts non-overlapping matches: when a match is found at offset `i`,
 /// the next probe starts at `i + pattern.len()`. Counting overlapping
@@ -204,31 +290,35 @@ fn count_range(start: usize, size: usize, pattern: WildcardPattern<'_>) -> usize
         return 0;
     }
     let upper = size - pat_len;
-    let (anchor_off, anchor_byte) = pattern
-        .iter()
-        .enumerate()
-        .find_map(|(i, b)| b.map(|byte| (i, byte)))
-        .unwrap_or((0, 0));
-    let has_anchor = pattern.iter().any(|b| b.is_some());
+    let Some((anchor_off, anchor_byte)) = anchor(pattern) else {
+        // All-wildcard pattern; same reasoning as `count_slice`. `pat_len
+        // >= 1` is guaranteed by the public-entry caller.
+        return size / pat_len;
+    };
 
     let mut count = 0usize;
     let mut i = 0usize;
     while i <= upper {
-        let addr = start + i;
-        if has_anchor {
-            // SAFETY: in-bounds by the same invariant as `scan_range`.
-            let candidate = unsafe { *((addr + anchor_off) as *const u8) };
-            if candidate != anchor_byte {
-                i += 1;
-                continue;
-            }
+        // `search_from < size` is guaranteed by `i <= upper` and
+        // `anchor_off < pat_len`.
+        let search_from = i + anchor_off;
+        // SAFETY: in-bounds for the declared range.
+        let Some(rel) =
+            (unsafe { first_byte_in_raw(start + search_from, size - search_from, anchor_byte) })
+        else {
+            break;
+        };
+        let candidate = search_from + rel - anchor_off;
+        if candidate > upper {
+            break;
         }
+        let addr = start + candidate;
         // SAFETY: in-bounds.
         if unsafe { matches_at(addr, pattern) } {
             count += 1;
-            i += pat_len;
+            i = candidate + pat_len;
         } else {
-            i += 1;
+            i = candidate + 1;
         }
     }
     count
@@ -525,5 +615,97 @@ mod tests {
         assert_eq!(count_in_text(base, pat), 0);
         assert!(find_in_exec_sections(base, pat).is_none());
         assert_eq!(count_in_exec_sections(base, pat), 0);
+    }
+
+    // -- raw-pointer all-wildcard fast path -------------------------------
+
+    /// All-wildcard pattern via the in-process API exercises the
+    /// `scan_range`/`count_range` "no anchor" early-return branches.
+    #[test]
+    fn synthetic_pe_text_all_wildcard_pattern() {
+        let text = [0xAAu8; 16];
+        let buf = synthetic_pe(&[(*b".text\0\0\0", 0x300, &text, IMAGE_SCN_MEM_EXECUTE)]);
+        let base = buf.as_ptr() as usize;
+        let pat: &[Option<u8>] = &[None, None, None, None];
+
+        // Find returns the section start (offset 0).
+        let hit = find_in_text(base, pat).unwrap();
+        let (text_start, _) = crate::pe::text_section_bounds(base).unwrap();
+        assert_eq!(hit, text_start);
+
+        // Count: floor(section_size / pat_len). Section is padded to its
+        // declared VirtualSize, not just the body length, so we just check
+        // the result is positive and divides cleanly.
+        let count = count_in_text(base, pat);
+        assert!(count >= text.len() / 4);
+    }
+
+    // -- candidate-past-upper break path ----------------------------------
+
+    /// Anchor byte appears in the trailing window where the full pattern
+    /// no longer fits — `scan_slice` / `count_slice` must take the
+    /// `candidate > upper` early-return / break path.
+    #[test]
+    fn slice_anchor_at_tail_no_room_for_pattern() {
+        // Anchor is 0x48; pattern length is 4. Plant 0x48 in the last byte
+        // so candidate would be haystack.len()-1 > upper = haystack.len()-4.
+        let mut buf = vec![0u8; 16];
+        buf[15] = 0x48;
+        let pat = pattern![0x48, 0x8B, 0x05, _];
+
+        assert!(crate::find_in_slice(&buf, pat).is_none());
+        assert_eq!(crate::count_in_slice(&buf, pat), 0);
+    }
+
+    /// `scan_slice` natural fall-through path: the anchor pre-filter
+    /// passes at `candidate == upper` but `matches_at` rejects the
+    /// candidate, leaving `i = candidate + 1 > upper` so the while loop
+    /// exits without ever returning, falling through to the trailing
+    /// `None`.
+    #[test]
+    fn slice_find_loop_exhausts_when_last_candidate_fails() {
+        // pat_len = 2, haystack.len() = 4, upper = 2. 0x48 only at index 2.
+        // matches_at(2) fails because byte 3 is 0xFF, not 0x8B.
+        let haystack = [0x00, 0x00, 0x48, 0xFF];
+        let pat = pattern![0x48, 0x8B];
+        assert!(find_in_slice(&haystack, pat).is_none());
+    }
+
+    // -- raw-pointer "anchor matches, full pattern doesn't" ---------------
+
+    /// Forces the in-process `scan_range` / `count_range` scanners through
+    /// the `matches_at == false` branch (raw-pointer `i = candidate + 1`),
+    /// and through the `candidate > upper` break path when the anchor
+    /// hits in the trailing window where the pattern no longer fits.
+    #[test]
+    fn synthetic_pe_text_anchor_match_but_full_pattern_mismatch() {
+        // Anchor 0x48 appears at offset 0 (full pattern fails) and at
+        // offset 4 which is past the upper bound for pat_len = 4 in a
+        // 5-byte body — exercising both `i = candidate + 1` (raw path)
+        // and `candidate > upper` (raw path) in one test.
+        let body = [0x48, 0x00, 0x00, 0x00, 0x48];
+        let buf = synthetic_pe(&[(*b".text\0\0\0", 0x300, &body, IMAGE_SCN_MEM_EXECUTE)]);
+        let base = buf.as_ptr() as usize;
+        let pat = pattern![0x48, 0xAA, 0xBB, 0xCC];
+
+        assert!(find_in_text(base, pat).is_none());
+        assert_eq!(count_in_text(base, pat), 0);
+    }
+
+    /// Companion to the above: anchor matches at exactly `upper` but the
+    /// full pattern doesn't, so `scan_range`'s while loop exits naturally
+    /// via the trailing `None`, and `count_range`'s while loop exits with
+    /// `count == 0`.
+    #[test]
+    fn synthetic_pe_text_anchor_at_upper_then_loop_exhausts() {
+        // pat_len = 4, body.len() = 4, upper = 0. Anchor at 0, full
+        // pattern fails (0x48 OK, 0x00 != 0xAA), i = 1, loop exits.
+        let body = [0x48, 0x00, 0x00, 0x00];
+        let buf = synthetic_pe(&[(*b".text\0\0\0", 0x300, &body, IMAGE_SCN_MEM_EXECUTE)]);
+        let base = buf.as_ptr() as usize;
+        let pat = pattern![0x48, 0xAA, 0xBB, 0xCC];
+
+        assert!(find_in_text(base, pat).is_none());
+        assert_eq!(count_in_text(base, pat), 0);
     }
 }

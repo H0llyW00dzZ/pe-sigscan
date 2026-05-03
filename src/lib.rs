@@ -99,6 +99,7 @@
 extern crate alloc;
 
 mod error;
+mod fastscan;
 mod pattern;
 mod pe;
 mod scan;
@@ -106,8 +107,8 @@ mod scan;
 pub use crate::error::{ParseErrorKind, ParsePatternError};
 pub use crate::pattern::{Pattern, WildcardPattern};
 pub use crate::scan::{
-    count_in_exec_sections, count_in_slice, count_in_text, find_in_exec_sections,
-    find_in_slice, find_in_text,
+    count_in_exec_sections, count_in_slice, count_in_text, find_in_exec_sections, find_in_slice,
+    find_in_text,
 };
 
 // ---------------------------------------------------------------------------
@@ -150,8 +151,12 @@ macro_rules! pattern {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __pattern_token {
-    (_) => { ::core::option::Option::<u8>::None };
-    ($byte:literal) => { ::core::option::Option::<u8>::Some($byte) };
+    (_) => {
+        ::core::option::Option::<u8>::None
+    };
+    ($byte:literal) => {
+        ::core::option::Option::<u8>::Some($byte)
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -206,14 +211,20 @@ mod tests {
 
     #[test]
     fn error_display_empty() {
-        let e = ParsePatternError { token_index: 0, kind: ParseErrorKind::Empty };
+        let e = ParsePatternError {
+            token_index: 0,
+            kind: ParseErrorKind::Empty,
+        };
         let s = alloc::format!("{e}");
         assert!(s.contains("no tokens"), "got: {s}");
     }
 
     #[test]
     fn error_display_invalid_length() {
-        let e = ParsePatternError { token_index: 3, kind: ParseErrorKind::InvalidLength };
+        let e = ParsePatternError {
+            token_index: 3,
+            kind: ParseErrorKind::InvalidLength,
+        };
         let s = alloc::format!("{e}");
         assert!(s.contains("token #3"), "got: {s}");
         assert!(s.contains("two hex digits"), "got: {s}");
@@ -221,7 +232,10 @@ mod tests {
 
     #[test]
     fn error_display_invalid_hex_digit() {
-        let e = ParsePatternError { token_index: 1, kind: ParseErrorKind::InvalidHexDigit };
+        let e = ParsePatternError {
+            token_index: 1,
+            kind: ParseErrorKind::InvalidHexDigit,
+        };
         let s = alloc::format!("{e}");
         assert!(s.contains("token #1"), "got: {s}");
         assert!(s.contains("non-hex"), "got: {s}");
@@ -229,7 +243,10 @@ mod tests {
 
     #[test]
     fn error_is_copy_and_clone() {
-        let e = ParsePatternError { token_index: 0, kind: ParseErrorKind::Empty };
+        let e = ParsePatternError {
+            token_index: 0,
+            kind: ParseErrorKind::Empty,
+        };
         let copied = e;
         let cloned = e.clone();
         assert_eq!(copied, e);
@@ -242,10 +259,16 @@ mod tests {
         // see the discriminant comparisons exercised.
         assert_eq!(ParseErrorKind::Empty, ParseErrorKind::Empty);
         assert_eq!(ParseErrorKind::InvalidLength, ParseErrorKind::InvalidLength);
-        assert_eq!(ParseErrorKind::InvalidHexDigit, ParseErrorKind::InvalidHexDigit);
+        assert_eq!(
+            ParseErrorKind::InvalidHexDigit,
+            ParseErrorKind::InvalidHexDigit
+        );
         assert_ne!(ParseErrorKind::Empty, ParseErrorKind::InvalidLength);
         assert_ne!(ParseErrorKind::Empty, ParseErrorKind::InvalidHexDigit);
-        assert_ne!(ParseErrorKind::InvalidLength, ParseErrorKind::InvalidHexDigit);
+        assert_ne!(
+            ParseErrorKind::InvalidLength,
+            ParseErrorKind::InvalidHexDigit
+        );
     }
 
     #[cfg(feature = "std")]
@@ -253,7 +276,10 @@ mod tests {
     fn error_implements_std_error() {
         // Existence proof: this only compiles if the trait impl exists.
         fn assert_error<E: std::error::Error>(_: &E) {}
-        let e = ParsePatternError { token_index: 0, kind: ParseErrorKind::Empty };
+        let e = ParsePatternError {
+            token_index: 0,
+            kind: ParseErrorKind::Empty,
+        };
         assert_error(&e);
     }
 

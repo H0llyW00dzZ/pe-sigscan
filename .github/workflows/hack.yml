@@ -36,11 +36,12 @@ jobs:
   coverage:
     name: 🔢 Test Coverage on ${{ matrix.os }} (Rust ${{ matrix.rust }})
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.rust == 'nightly' }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, ubuntu-22.04, ubuntu-24.04-arm, ubuntu-22.04-arm, macos-latest, windows-latest, windows-2022, windows-11-arm]
-        rust: [stable, beta, '1.70']
+        rust: [stable, beta, nightly, '1.70']
 
     steps:
     - name: Checkout code
@@ -59,15 +60,22 @@ jobs:
       uses: taiki-e/install-action@v2
       with:
         tool: cargo-llvm-cov
-      if: ${{ matrix.os != 'windows-11-arm' }}
+      if: ${{ matrix.os != 'windows-11-arm' && matrix.rust != '1.70' }}
 
     - name: Run tests with coverage
-      if: ${{ matrix.os != 'windows-11-arm' }}
+      if: ${{ matrix.os != 'windows-11-arm' && matrix.rust != '1.70' }}
       run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
 
-    - name: Run tests (no coverage on this runner)
-      if: ${{ matrix.os == 'windows-11-arm' }}
+    - name: Run tests (no coverage on windows-11-arm)
+      if: ${{ matrix.os == 'windows-11-arm' && matrix.rust != '1.70' }}
       run: cargo test --all-features
+
+    # MSRV check: only verify the library itself compiles on 1.70.
+    # `cargo build` does NOT resolve dev-dependencies, so newer dev-deps
+    # (e.g. criterion's transitive clap_builder) cannot affect this job.
+    - name: MSRV build check
+      if: ${{ matrix.rust == '1.70' }}
+      run: cargo build --all-features --verbose
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v6

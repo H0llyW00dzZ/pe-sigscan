@@ -80,9 +80,9 @@ pub fn count_in_text(module_base: usize, pattern: WildcardPattern<'_>) -> usize 
 /// the PE module loaded at `module_base`.
 ///
 /// Use this when the function may live outside the section literally named
-/// `.text`. Source 2 DLLs (notably `scenesystem.dll` on some builds) split
-/// code across multiple sections, and the section named `.text` may not
-/// contain the function at all.
+/// `.text`. Some compilers and linkers split code across multiple executable
+/// sections (for example `.text$mn`, `.textbss`, or optimized code arenas),
+/// and the section named `.text` may not contain the target function.
 ///
 /// Same speed as [`find_in_text`] (direct in-process reads bounded to
 /// PE-declared section ranges); the only difference is the section-name

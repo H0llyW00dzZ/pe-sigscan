@@ -27,10 +27,15 @@ accessible code by its byte signature.
 - **Direct memory reads** (no `ReadProcessMemory` round-trip per byte) —
   suitable for scanning tens of megabytes of `.text` in well under a
   second.
+- **Vectorized first-byte search**. The hot anchor pre-filter ships in two
+  flavours: a portable SWAR (8-byte word) implementation that is the
+  default, and an optional `memchr`-backed path that uses runtime-detected
+  AVX2 / SSE2 / NEON. See [Performance](#performance) for numbers.
 - **`#![no_std]`-compatible**, allocates only when constructing an owned
   `Pattern` from an IDA-style string. The compile-time `pattern!` macro
   produces a `&'static [Option<u8>]` with zero allocation.
-- **Zero dependencies.**
+- **Zero dependencies by default.** Enabling the optional `memchr` feature
+  pulls in a single SIMD-accelerated dependency.
 
 ## Quick start
 
@@ -39,6 +44,13 @@ Add the crate to your `Cargo.toml`:
 ```toml
 [dependencies]
 pe-sigscan = "0.1"
+```
+
+Or, for SIMD-accelerated scans (recommended for cheats / mod loaders):
+
+```toml
+[dependencies]
+pe-sigscan = { version = "0.1", features = ["memchr"] }
 ```
 
 ### Scanning the loaded process
@@ -138,6 +150,55 @@ assert!(Pattern::from_ida("48 ZZ 89").is_err());          // invalid hex
 assert!(Pattern::from_ida("48 8 89").is_err());           // single hex digit
 assert!(Pattern::from_ida("").is_err());                  // empty
 ```
+
+## Performance
+
+Signature scanning is dominated by the inner loop that probes one anchor
+byte (the first non-wildcard byte of the pattern) at every candidate
+offset. This crate ships two implementations of that hot path:
+
+- **SWAR (default)** — portable 8-byte word search using the standard
+  "has-zero-byte" bit-twiddle. Pure no_std Rust, no dependencies, works on
+  every target rustc supports.
+- **memchr (`memchr` feature)** — delegates the anchor scan to the
+  [`memchr`](https://crates.io/crates/memchr) crate, which performs runtime
+  CPU feature detection and uses AVX2 / SSE2 on x86_64 and NEON on aarch64.
+
+### Benchmark numbers
+
+The bench (`benches/scan.rs`, criterion) searches an 8-byte pattern with one
+wildcard (`48 8B 05 ? ? ? ? 48`) inside a 1 MiB buffer of zeros — a worst
+case where the anchor byte never matches and the inner loop has to traverse
+the entire haystack.
+
+| Backend | `find_in_slice` (1 MiB) | `count_in_slice` (1 MiB) | vs. naive |
+| --- | --- | --- | --- |
+| Naive byte-by-byte (pre-fastscan) | ~662 µs | ~331 µs | 1× |
+| SWAR fallback (default features) | ~102 µs | ~99 µs | **6.5× / 3.3×** |
+| memchr (`--features memchr`) | **~10 µs** | **~10 µs** | **63× / 32×** |
+
+Numbers from a Windows 11 / x86_64 box; the relative gap holds on Linux and
+macOS. Run `cargo bench` (default backend) or
+`cargo bench --features memchr` to reproduce.
+
+### When to enable `memchr`
+
+Enable it when scan throughput matters — typically in-process tooling that
+sweeps tens to hundreds of megabytes per pass:
+
+- Internal cheat / mod loaders scanning `client.dll` (~30–60 MB) or
+  `GameAssembly.dll` (50–200 MB) at injection time.
+- Anti-cheat-aware code that wants to keep the CPU spike short.
+- Test harnesses re-running 100+ signatures after every game update.
+
+```toml
+[dependencies]
+pe-sigscan = { version = "0.1", features = ["memchr"] }
+```
+
+For one-shot offline tools (Ghidra/IDA scripts, sig-dev REPLs), the default
+SWAR path is already 3–6× faster than naive and you can keep the crate
+dependency-free.
 
 ## Why direct memory reads?
 

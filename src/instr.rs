@@ -93,7 +93,7 @@ pub unsafe fn resolve_rel32(rel32_addr: usize, next_ip: usize) -> usize {
 /// resolve_rel32(match_addr + rel32_offset, match_addr + instr_len)
 /// ```
 ///
-/// See the [module-level table](self) for `rel32_offset` / `instr_len`
+/// See the table at the top of this module for `rel32_offset` / `instr_len`
 /// values for the most common x64 instruction shapes.
 ///
 /// # Examples

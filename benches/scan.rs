@@ -21,7 +21,8 @@
 //! across haystack sizes — a 1 MiB scan and a 64 MiB scan should show the
 //! same GB/s when the inner loop is the bottleneck.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
 use pe_sigscan::{
     count_in_slice, find_in_slice, iter_in_slice, pattern, read_rel32, resolve_rel32,
     resolve_rel32_at,

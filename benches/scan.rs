@@ -22,11 +22,11 @@
 //! same GB/s when the inner loop is the bottleneck.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use std::hint::black_box;
 use pe_sigscan::{
     count_in_slice, find_in_slice, iter_in_slice, pattern, read_rel32, resolve_rel32,
     resolve_rel32_at,
 };
+use std::hint::black_box;
 
 // ----------------------------------------------------------------------
 // Haystack generators
@@ -432,15 +432,17 @@ fn bench_scan_and_resolve(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_find_no_hit,
-    bench_find_hit_position,
-    bench_count,
-    bench_pattern_length,
-    bench_iter_in_slice,
-    bench_iter_match_density,
-    bench_rel32_helpers,
-    bench_scan_and_resolve,
-);
+criterion_group! {
+    name = benches;
+    config = Criterion::default().sample_size(50);
+    targets =
+        bench_find_no_hit,
+        bench_find_hit_position,
+        bench_count,
+        bench_pattern_length,
+        bench_iter_in_slice,
+        bench_iter_match_density,
+        bench_rel32_helpers,
+        bench_scan_and_resolve,
+}
 criterion_main!(benches);

@@ -1233,4 +1233,249 @@ mod tests {
         let pat = pattern![0x48];
         assert_eq!(iter_in_exec_sections(base, pat).count(), 0);
     }
+
+    #[cfg(feature = "section-info")]
+    mod section_info_tests {
+        use super::synthetic_pe;
+        use crate::pattern;
+        use crate::pe::IMAGE_SCN_MEM_EXECUTE;
+        use crate::scan::{count_in_section, find_in_section, iter_in_section};
+        use alloc::vec;
+        use alloc::vec::Vec;
+
+        /// Two-section PE used by every bounds-sanity test:
+        ///
+        /// - `.text  @ 0x300`: `90 AA BB CC DD C3` (only `[AA BB CC DD]` and
+        ///   `[AA BB]` substrings).
+        /// - `.rdata @ 0x400`: `00 11 22 33 44 11 22 FF` (two `[11 22]`
+        ///   matches at offsets +0x401 and +0x405).
+        ///
+        /// Patterns are picked so byte values in one section never collide
+        /// with the other — bleed across section boundaries shows up
+        /// directly as a wrong count.
+        fn multi_section_pe() -> Vec<u8> {
+            let text_body = [0x90u8, 0xAA, 0xBB, 0xCC, 0xDD, 0xC3];
+            let rdata_body = [0x00u8, 0x11, 0x22, 0x33, 0x44, 0x11, 0x22, 0xFF];
+            synthetic_pe(&[
+                (*b".text\0\0\0", 0x300, &text_body, IMAGE_SCN_MEM_EXECUTE),
+                (*b".rdata\0\0", 0x400, &rdata_body, 0),
+            ])
+        }
+
+        // -- find_in_section -----------------------------------------------
+
+        #[test]
+        fn returns_match_in_named_section() {
+            let buf = multi_section_pe();
+            let base = buf.as_ptr() as usize;
+            let pat = pattern![0x11, 0x22, 0x33];
+            assert_eq!(find_in_section(base, b".rdata", pat), Some(base + 0x401));
+        }
+
+        #[test]
+        fn does_not_cross_section_bounds() {
+            // Pattern lives only in .text — querying .rdata must miss,
+            // querying .text must hit. Catches the regression where a
+            // section-targeted scanner accidentally walks the whole image.
+            let buf = multi_section_pe();
+            let base = buf.as_ptr() as usize;
+            let pat = pattern![0xAA, 0xBB, 0xCC, 0xDD];
+            assert!(find_in_section(base, b".rdata", pat).is_none());
+            assert_eq!(find_in_section(base, b".text", pat), Some(base + 0x301));
+        }
+
+        #[test]
+        fn matches_section_name_by_prefix() {
+            // ".rdata$z" suffix-tagged section caught by ".rdata" query.
+            let body = [0xDEu8, 0xAD, 0xBE, 0xEF];
+            let buf = synthetic_pe(&[(*b".rdata$z", 0x300, &body, 0)]);
+            let base = buf.as_ptr() as usize;
+            let pat = pattern![0xDE, 0xAD, 0xBE, 0xEF];
+            assert_eq!(find_in_section(base, b".rdata", pat), Some(base + 0x300));
+        }
+
+        #[test]
+        fn full_eight_byte_name_disambiguates() {
+            // Two sections both starting with ".text"; the 8-byte query
+            // must hit ".text\0\0\0" exactly and skip ".text$mn".
+            let mn_body = [0x11u8, 0x22, 0x33];
+            let text_body = [0xAAu8, 0xBB, 0xCC];
+            let buf = synthetic_pe(&[
+                (*b".text$mn", 0x300, &mn_body, IMAGE_SCN_MEM_EXECUTE),
+                (*b".text\0\0\0", 0x400, &text_body, IMAGE_SCN_MEM_EXECUTE),
+            ]);
+            let base = buf.as_ptr() as usize;
+            // Querying with the full 8-byte name lands on the second section.
+            let pat = pattern![0xAA, 0xBB, 0xCC];
+            assert_eq!(
+                find_in_section(base, b".text\0\0\0", pat),
+                Some(base + 0x400),
+            );
+            // Bytes from the .text\0\0\0 section are absent from .text$mn.
+            assert!(find_in_section(base, b".text$mn", pat).is_none());
+        }
+
+        #[test]
+        fn returns_none_when_section_missing() {
+            let body = [0x90u8];
+            let buf = synthetic_pe(&[(*b".text\0\0\0", 0x300, &body, IMAGE_SCN_MEM_EXECUTE)]);
+            let base = buf.as_ptr() as usize;
+            let pat = pattern![0x90];
+            assert!(find_in_section(base, b".rdata", pat).is_none());
+        }
+
+        #[test]
+        fn returns_none_when_pattern_absent() {
+            let buf = multi_section_pe();
+            let base = buf.as_ptr() as usize;
+            let pat = pattern![0xFF, 0xFF, 0xFF, 0xFF];
+            assert!(find_in_section(base, b".rdata", pat).is_none());
+        }
+
+        #[test]
+        fn null_module_returns_none() {
+            let pat = pattern![0x90];
+            assert!(find_in_section(0, b".rdata", pat).is_none());
+        }
+
+        #[test]
+        fn empty_pattern_returns_none() {
+            let buf = multi_section_pe();
+            let base = buf.as_ptr() as usize;
+            let pat: &[Option<u8>] = &[];
+            assert!(find_in_section(base, b".rdata", pat).is_none());
+        }
+
+        #[test]
+        fn malformed_module_returns_none() {
+            let buf = vec![0u8; 0x400];
+            let base = buf.as_ptr() as usize;
+            let pat = pattern![0x90];
+            assert!(find_in_section(base, b".rdata", pat).is_none());
+        }
+
+        // -- count_in_section ----------------------------------------------
+
+        #[test]
+        fn count_finds_all_matches_in_section() {
+            let buf = multi_section_pe();
+            let base = buf.as_ptr() as usize;
+            // [11 22] appears twice in .rdata (offsets +0x401, +0x405).
+            let pat = pattern![0x11, 0x22];
+            assert_eq!(count_in_section(base, b".rdata", pat), 2);
+        }
+
+        #[test]
+        fn count_does_not_include_other_sections() {
+            let buf = multi_section_pe();
+            let base = buf.as_ptr() as usize;
+            // [AA BB] is in .text only.
+            let pat = pattern![0xAA, 0xBB];
+            assert_eq!(count_in_section(base, b".rdata", pat), 0);
+            assert_eq!(count_in_section(base, b".text", pat), 1);
+        }
+
+        #[test]
+        fn count_returns_zero_when_section_missing() {
+            let body = [0x90u8];
+            let buf = synthetic_pe(&[(*b".text\0\0\0", 0x300, &body, IMAGE_SCN_MEM_EXECUTE)]);
+            let base = buf.as_ptr() as usize;
+            let pat = pattern![0x90];
+            assert_eq!(count_in_section(base, b".rdata", pat), 0);
+        }
+
+        #[test]
+        fn count_null_module_returns_zero() {
+            let pat = pattern![0x90];
+            assert_eq!(count_in_section(0, b".rdata", pat), 0);
+        }
+
+        #[test]
+        fn count_empty_pattern_returns_zero() {
+            let buf = multi_section_pe();
+            let base = buf.as_ptr() as usize;
+            let pat: &[Option<u8>] = &[];
+            assert_eq!(count_in_section(base, b".rdata", pat), 0);
+        }
+
+        #[test]
+        fn count_malformed_module_returns_zero() {
+            let buf = vec![0u8; 0x400];
+            let base = buf.as_ptr() as usize;
+            let pat = pattern![0x90];
+            assert_eq!(count_in_section(base, b".rdata", pat), 0);
+        }
+
+        // -- iter_in_section -----------------------------------------------
+
+        #[test]
+        fn iter_yields_all_matches_in_order() {
+            let buf = multi_section_pe();
+            let base = buf.as_ptr() as usize;
+            let pat = pattern![0x11, 0x22];
+            let hits: Vec<usize> = iter_in_section(base, b".rdata", pat).collect();
+            assert_eq!(hits, vec![base + 0x401, base + 0x405]);
+        }
+
+        #[test]
+        fn iter_first_equals_find_in_section() {
+            let buf = multi_section_pe();
+            let base = buf.as_ptr() as usize;
+            let pat = pattern![0x11, 0x22];
+            assert_eq!(
+                iter_in_section(base, b".rdata", pat).next(),
+                find_in_section(base, b".rdata", pat),
+            );
+        }
+
+        #[test]
+        fn iter_count_equals_count_in_section() {
+            let buf = multi_section_pe();
+            let base = buf.as_ptr() as usize;
+            let pat = pattern![0x11, 0x22];
+            assert_eq!(
+                iter_in_section(base, b".rdata", pat).count(),
+                count_in_section(base, b".rdata", pat),
+            );
+        }
+
+        #[test]
+        fn iter_does_not_cross_section_bounds() {
+            let buf = multi_section_pe();
+            let base = buf.as_ptr() as usize;
+            let pat = pattern![0xAA, 0xBB];
+            assert_eq!(iter_in_section(base, b".rdata", pat).count(), 0);
+        }
+
+        #[test]
+        fn iter_section_missing_yields_nothing() {
+            let body = [0x90u8];
+            let buf = synthetic_pe(&[(*b".text\0\0\0", 0x300, &body, IMAGE_SCN_MEM_EXECUTE)]);
+            let base = buf.as_ptr() as usize;
+            let pat = pattern![0x90];
+            assert_eq!(iter_in_section(base, b".rdata", pat).count(), 0);
+        }
+
+        #[test]
+        fn iter_null_module_yields_nothing() {
+            let pat = pattern![0x90];
+            assert_eq!(iter_in_section(0, b".rdata", pat).count(), 0);
+        }
+
+        #[test]
+        fn iter_empty_pattern_yields_nothing() {
+            let buf = multi_section_pe();
+            let base = buf.as_ptr() as usize;
+            let pat: &[Option<u8>] = &[];
+            assert_eq!(iter_in_section(base, b".rdata", pat).count(), 0);
+        }
+
+        #[test]
+        fn iter_malformed_module_yields_nothing() {
+            let buf = vec![0u8; 0x400];
+            let base = buf.as_ptr() as usize;
+            let pat = pattern![0x90];
+            assert_eq!(iter_in_section(base, b".rdata", pat).count(), 0);
+        }
+    }
 }

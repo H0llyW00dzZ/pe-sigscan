@@ -24,7 +24,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use pe_sigscan::{
     count_in_slice, find_in_slice, iter_in_slice, pattern, read_rel32, resolve_rel32,
-    resolve_rel32_at,
+    resolve_rel32_at, Pattern,
 };
 use std::hint::black_box;
 
@@ -432,6 +432,138 @@ fn bench_scan_and_resolve(c: &mut Criterion) {
     group.finish();
 }
 
+// ----------------------------------------------------------------------
+// Pattern parsing
+// ----------------------------------------------------------------------
+
+fn bench_pattern_parse(c: &mut Criterion) {
+    let mut group = c.benchmark_group("pattern_parse");
+
+    let short = "48 8B 05 ?? ?? ?? ??";
+    let medium = "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B F9 48 8B";
+    let long = (0..40)
+        .map(|i| if i % 3 == 0 { "??" } else { "48" })
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    for (name, pat) in [("short", short), ("medium", medium), ("long", &long)] {
+        group.bench_function(name, |b| {
+            b.iter(|| Pattern::from_ida(black_box(pat)).unwrap())
+        });
+    }
+
+    group.finish();
+}
+
+// ----------------------------------------------------------------------
+// First-byte search (fastscan hot path)
+// ----------------------------------------------------------------------
+
+fn bench_first_byte_search(c: &mut Criterion) {
+    let mut group = c.benchmark_group("first_byte_search");
+    let haystack: Vec<u8> = (0..1024 * 1024).map(|i| (i % 251) as u8).collect();
+    let needle = 0xDE;
+
+    group.throughput(Throughput::Bytes(haystack.len() as u64));
+    group.bench_function("first_byte_in_slice", |b| {
+        b.iter(|| pe_sigscan::find_in_slice(black_box(&haystack), black_box(&[Some(needle)])))
+    });
+
+    group.finish();
+}
+
+// ----------------------------------------------------------------------
+// Multi-section executable scanning (pe + scan)
+// ----------------------------------------------------------------------
+
+fn bench_exec_sections(c: &mut Criterion) {
+    let mut group = c.benchmark_group("exec_sections");
+    let haystack: Vec<u8> = (0..1024 * 1024).map(|i| (i % 251) as u8).collect();
+    let pat = pattern![0xDE, _, _, _, 0xBE];
+
+    group.throughput(Throughput::Bytes(haystack.len() as u64));
+    group.bench_function("find_in_exec_sections", |b| {
+        b.iter(|| find_in_slice(black_box(&haystack), black_box(pat)))
+    });
+    group.bench_function("count_in_exec_sections", |b| {
+        b.iter(|| count_in_slice(black_box(&haystack), black_box(pat)))
+    });
+
+    group.finish();
+}
+
+// ----------------------------------------------------------------------
+// Synthetic PE multi-section scenarios
+// ----------------------------------------------------------------------
+
+fn bench_synthetic_pe(c: &mut Criterion) {
+    let mut group = c.benchmark_group("synthetic_pe");
+    // Simulate a PE with .text + .text$mn + .textbss style layout
+    let mut buf = vec![0u8; 512 * 1024];
+    // Plant matches in different "sections"
+    buf[100] = 0x48;
+    buf[101] = 0x8B;
+    buf[200_000] = 0x48;
+    buf[200_001] = 0x8B;
+    buf[400_000] = 0x48;
+    buf[400_001] = 0x8B;
+
+    let pat = pattern![0x48, 0x8B, _, _];
+
+    group.throughput(Throughput::Bytes(buf.len() as u64));
+    group.bench_function("find_across_sections", |b| {
+        b.iter(|| find_in_slice(black_box(&buf), black_box(pat)))
+    });
+    group.bench_function("count_across_sections", |b| {
+        b.iter(|| count_in_slice(black_box(&buf), black_box(pat)))
+    });
+    group.bench_function("iter_across_sections", |b| {
+        b.iter(|| iter_in_slice(black_box(&buf), black_box(pat)).count())
+    });
+
+    group.finish();
+}
+
+// ----------------------------------------------------------------------
+// Fastscan primitives (SWAR / first-byte search edge cases)
+// ----------------------------------------------------------------------
+
+fn bench_fastscan_primitives(c: &mut Criterion) {
+    let mut group = c.benchmark_group("fastscan");
+
+    // Empty slice
+    let empty: &[u8] = &[];
+    group.bench_function("empty_slice", |b| {
+        b.iter(|| find_in_slice(black_box(empty), black_box(&[Some(0x48)])))
+    });
+
+    // Finds in tail (pattern near end of buffer)
+    let mut tail = vec![0u8; 4096];
+    tail[4090] = 0x48;
+    tail[4091] = 0x8B;
+    let pat_tail = pattern![0x48, 0x8B];
+    group.bench_function("finds_in_tail", |b| {
+        b.iter(|| find_in_slice(black_box(&tail), black_box(pat_tail)))
+    });
+
+    // SWAR high-bit bytes (stress the bit-twiddling path)
+    let high_bit: Vec<u8> = (0..8192).map(|i| if i % 7 == 0 { 0x80 | (i as u8) } else { i as u8 }).collect();
+    let pat_high = pattern![0xDE];
+    group.bench_function("swar_high_bit_bytes", |b| {
+        b.iter(|| find_in_slice(black_box(&high_bit), black_box(pat_high)))
+    });
+
+    // First-byte absent (worst case for anchor scan)
+    let absent: Vec<u8> = (0..1024 * 1024).map(|i| (i % 250) as u8).collect();
+    let pat_absent = pattern![0xFF, _, _, _];
+    group.throughput(Throughput::Bytes(absent.len() as u64));
+    group.bench_function("returns_none_when_absent", |b| {
+        b.iter(|| find_in_slice(black_box(&absent), black_box(pat_absent)))
+    });
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(50);
@@ -444,5 +576,10 @@ criterion_group! {
         bench_iter_match_density,
         bench_rel32_helpers,
         bench_scan_and_resolve,
+        bench_pattern_parse,
+        bench_first_byte_search,
+        bench_exec_sections,
+        bench_synthetic_pe,
+        bench_fastscan_primitives,
 }
 criterion_main!(benches);

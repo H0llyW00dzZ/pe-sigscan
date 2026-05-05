@@ -36,6 +36,28 @@ std = []
 # `memchr` is just faster on hot paths in benchmarks.
 memchr = ["dep:memchr"]
 
+# Optional: section-targeted scanners + cross-module rel32
+# disambiguation helper. Pure-additive on top of the always-available
+# scanning APIs.
+#
+# Adds these public items at the crate root:
+#   - `find_in_section(module_base, section_name, pattern)`
+#   - `count_in_section(module_base, section_name, pattern)`
+#   - `iter_in_section(module_base, section_name, pattern)`
+#   - `module_size(module_base)`  — reads OptionalHeader.SizeOfImage
+#
+# Same shape as the headline `find_in_text` / `find_in_exec_sections`
+# / `count_*` / `iter_*` family but takes a section name as a
+# parameter, letting callers scan inside `.rdata`, `.pdata`,
+# `.text$mn`, etc. Internally the section lookup goes through the
+# crate-private `crate::pe::find_section` helper — no new walking
+# logic, just a section name parameter on the existing scanners.
+#
+# Off by default so callers who only need the four headline scanners
+# aren't compiling code they don't use. Enabling this feature does
+# not alter any always-available code path.
+section-info = []
+
 [dependencies]
 # Intentionally none by default. PE header parsing + byte search are pure
 # compute. Keeping the crate's MSRV low and footprint minimal — the entire
@@ -48,9 +70,10 @@ memchr = ["dep:memchr"]
 memchr = { version = "2", default-features = false, features = ["alloc"], optional = true }
 
 [dev-dependencies]
-# Only required for `cargo bench`. Pinned to 0.5.1 to keep transitive
-# dependencies compatible with stable Rust toolchains. Note: dev-deps are
-# not resolved by `cargo build`/`cargo check`, so they do not affect MSRV.
+# Only required for `cargo bench` — the test suite uses the standard
+# library's built-in test harness and does not need criterion.
+# Note: dev-deps are not resolved by `cargo build`/`cargo check`, so
+# they do not affect the crate's MSRV (1.70).
 criterion = { version = "0.8.2", features = ["html_reports"] }
 
 [[bench]]

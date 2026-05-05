@@ -306,6 +306,92 @@ pub fn iter_in_exec_sections<'a>(module_base: usize, pattern: WildcardPattern<'a
     }
 }
 
+/// Find the first occurrence of `pattern` within the section whose
+/// 8-byte name starts with `section_name`.
+///
+/// `section_name` matches `IMAGE_SECTION_HEADER.Name` as a byte
+/// prefix: `b".text"` matches `.text\0\0\0`, `.text$mn`, `.textbss`.
+/// Pass the full 8 bytes for exact-match disambiguation.
+///
+/// Returns `None` if `module_base` is zero, the pattern is empty,
+/// the section is missing, or the pattern doesn't match. Returned
+/// addresses are absolute — same shape as [`find_in_text`].
+///
+/// # Examples
+///
+/// ```no_run
+/// use pe_sigscan::{find_in_section, pattern};
+/// # let module_base = 0usize;
+///
+/// let pat = pattern![b'h', b'e', b'l', b'l', b'o', 0x00];
+/// if let Some(addr) = find_in_section(module_base, b".rdata", pat) {
+///     println!("string at {addr:#x}");
+/// }
+/// ```
+#[cfg(feature = "section-info")]
+#[must_use]
+pub fn find_in_section(
+    module_base: usize,
+    section_name: &[u8],
+    pattern: WildcardPattern<'_>,
+) -> Option<usize> {
+    if module_base == 0 || pattern.is_empty() {
+        return None;
+    }
+    let section = crate::pe::find_section(module_base, section_name)?;
+    scan_range(section.virtual_address, section.virtual_size, pattern)
+}
+
+/// Count non-overlapping occurrences of `pattern` within the named
+/// section. Companion to [`find_in_section`]; same uniqueness
+/// contract as [`count_in_text`].
+///
+/// Returns `0` if `module_base` is zero, the pattern is empty, the
+/// section is missing, or the pattern doesn't match.
+#[cfg(feature = "section-info")]
+#[must_use]
+pub fn count_in_section(
+    module_base: usize,
+    section_name: &[u8],
+    pattern: WildcardPattern<'_>,
+) -> usize {
+    if module_base == 0 || pattern.is_empty() {
+        return 0;
+    }
+    let Some(section) = crate::pe::find_section(module_base, section_name) else {
+        return 0;
+    };
+    count_range(section.virtual_address, section.virtual_size, pattern)
+}
+
+/// Iterate over every non-overlapping occurrence of `pattern` within
+/// the named section.
+///
+/// Yields nothing if `module_base` is zero, the pattern is empty, or
+/// the section is missing. Yielded addresses are absolute — same
+/// shape as [`iter_in_text`].
+#[cfg(feature = "section-info")]
+#[must_use]
+pub fn iter_in_section<'a>(
+    module_base: usize,
+    section_name: &[u8],
+    pattern: WildcardPattern<'a>,
+) -> Matches<'a> {
+    let sections = if module_base == 0 || pattern.is_empty() {
+        alloc::vec::Vec::new()
+    } else {
+        crate::pe::find_section(module_base, section_name)
+            .map(|s| alloc::vec![(s.virtual_address, s.virtual_size)])
+            .unwrap_or_default()
+    };
+    Matches {
+        sections,
+        section_idx: 0,
+        cursor: 0,
+        pattern,
+    }
+}
+
 /// Locate the first non-wildcard byte in the pattern. Returns the
 /// (offset_within_pattern, byte_value) pair, or `None` if the pattern is
 /// all wildcards (in which case the anchor pre-filter must be skipped).

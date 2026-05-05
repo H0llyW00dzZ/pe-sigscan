@@ -726,7 +726,15 @@ fn bench_fastscan_primitives(c: &mut Criterion) {
     });
 
     // SWAR high-bit bytes (stress the bit-twiddling path)
-    let high_bit: Vec<u8> = (0..8192).map(|i| if i % 7 == 0 { 0x80 | (i as u8) } else { i as u8 }).collect();
+    let high_bit: Vec<u8> = (0..8192)
+        .map(|i| {
+            if i % 7 == 0 {
+                0x80 | (i as u8)
+            } else {
+                i as u8
+            }
+        })
+        .collect();
     let pat_high = pattern![0xDE];
     group.bench_function("swar_high_bit_bytes", |b| {
         b.iter(|| find_in_slice(black_box(&high_bit), black_box(pat_high)))

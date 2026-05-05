@@ -10,7 +10,7 @@ read in your own process and reports where a pattern matches.
 
 ## Legitimate use
 
-The categories listed under [Use Cases](#use-cases) in the README —
+The categories listed under [Use Cases](README.md#use-cases) in the README —
 game modding, in-process tooling, reverse engineering, malware analysis,
 security research, and debugging — are well-established forms of software
 engineering and research with explicit legal grounding:

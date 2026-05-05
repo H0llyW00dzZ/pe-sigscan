@@ -36,15 +36,13 @@ std = []
 # `memchr` is just faster on hot paths in benchmarks.
 memchr = ["dep:memchr"]
 
-# Optional: section-targeted scanners + cross-module rel32
-# disambiguation helper. Pure-additive on top of the always-available
-# scanning APIs.
+# Optional: section-targeted scanners. Pure-additive on top of the
+# always-available scanning APIs.
 #
 # Adds these public items at the crate root:
 #   - `find_in_section(module_base, section_name, pattern)`
 #   - `count_in_section(module_base, section_name, pattern)`
 #   - `iter_in_section(module_base, section_name, pattern)`
-#   - `module_size(module_base)`  — reads OptionalHeader.SizeOfImage
 #
 # Same shape as the headline `find_in_text` / `find_in_exec_sections`
 # / `count_*` / `iter_*` family but takes a section name as a
@@ -56,6 +54,9 @@ memchr = ["dep:memchr"]
 # Off by default so callers who only need the four headline scanners
 # aren't compiling code they don't use. Enabling this feature does
 # not alter any always-available code path.
+#
+# Note: `module_size` (useful for cross-module rel32 range checks)
+# is always available and not tied to this feature.
 section-info = []
 
 [dependencies]

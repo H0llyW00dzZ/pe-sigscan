@@ -50,13 +50,6 @@ const SECTION_HEADER_SIZE: usize = 40;
 
 /// Byte offset of the optional header relative to NT headers
 /// (`Signature` u32 + `IMAGE_FILE_HEADER` 20 bytes).
-///
-/// Only consumed under the `section-info` feature ([`module_size`])
-/// or in `#[cfg(test)]` (the synthetic-PE builder writes the
-/// SizeOfImage field at this offset). Gating prevents a `dead_code`
-/// warning on default `cargo check` / `cargo build` invocations
-/// where neither code path is compiled.
-#[cfg(any(feature = "section-info", test))]
 const OPTIONAL_HEADER_OFFSET: usize = 4 + FILE_HEADER_SIZE;
 
 /// Byte offset of `IMAGE_OPTIONAL_HEADER.SizeOfImage` *within the
@@ -65,7 +58,6 @@ const OPTIONAL_HEADER_OFFSET: usize = 4 + FILE_HEADER_SIZE;
 /// (`ImageBase` is `u32` in PE32 and `u64` in PE32+; `BaseOfData`
 /// is PE32-only). Because the totals come out the same, we can
 /// read `SizeOfImage` without distinguishing the two formats.
-#[cfg(feature = "section-info")]
 const OPTIONAL_HEADER_SIZE_OF_IMAGE_OFFSET: usize = 56;
 
 // ---------------------------------------------------------------------------
@@ -80,7 +72,6 @@ struct PeHeaders {
     module_base: usize,
     /// Absolute address of the NT headers (`module_base + e_lfanew`).
     /// Used by `module_size` to reach `OptionalHeader.SizeOfImage`.
-    #[cfg_attr(not(feature = "section-info"), allow(dead_code))]
     nt: usize,
     /// Absolute address of the first `IMAGE_SECTION_HEADER` entry.
     section_table: usize,
@@ -228,7 +219,7 @@ pub(crate) fn text_section_bounds(module_base: usize) -> Option<(usize, usize)> 
 }
 
 // ---------------------------------------------------------------------------
-// module_size (feature `section-info`)
+// module_size (always available)
 // ---------------------------------------------------------------------------
 
 /// Read `IMAGE_OPTIONAL_HEADER.SizeOfImage` — the total mapped size
@@ -243,10 +234,6 @@ pub(crate) fn text_section_bounds(module_base: usize) -> Option<(usize, usize)> 
 /// [`crate::resolve_rel32_at`] gives you an absolute target, check
 /// whether it lands inside this module or jumps out to another
 /// loaded DLL (`ntdll`, `kernel32`, a delay-imported library).
-///
-/// `pub` rather than `pub(crate)` so `lib.rs` can `pub use` it; the
-/// containing `pe` module is private, so users only see it at
-/// `pe_sigscan::module_size`.
 ///
 /// # Example
 ///
@@ -265,7 +252,6 @@ pub(crate) fn text_section_bounds(module_base: usize) -> Option<(usize, usize)> 
 ///     }
 /// }
 /// ```
-#[cfg(feature = "section-info")]
 #[must_use]
 pub fn module_size(module_base: usize) -> Option<usize> {
     let hdr = parse_pe_headers(module_base)?;

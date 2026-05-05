@@ -30,8 +30,10 @@ accessible code by its byte signature.
   `count_in_section`, and `iter_in_section` scan any named section by
   prefix, so you can locate string literals or vtables in `.rdata`,
   runtime globals in `.data`, exception unwind data in `.pdata`, and so
-  on. The same feature exposes `module_size` for cross-module rel32 range
-  checks. Zero impact on the default build.
+  on. Zero impact on the default build.
+- **`module_size`** (always available) reads `OptionalHeader.SizeOfImage`
+  for cross-module rel32 disambiguation when used with the
+  `resolve_rel32*` helpers.
 - **Hook-install uniqueness**: companion `count_*` functions let you verify
   a pattern matches exactly once before patching, so you never silently
   hook the wrong function.
@@ -222,9 +224,9 @@ Section names are matched against the 8-byte on-disk name field by
 prefix, so `b".rdata"` also catches suffix-tagged variants like
 `.rdata$zz`.
 
-The same feature also exposes `module_size`, which reads `SizeOfImage`
-from the optional header. Useful for filtering rel32 resolutions that
-land outside the current module:
+`module_size` (always available, independent of the `section-info`
+feature) reads `SizeOfImage` from the optional header. Useful for
+filtering rel32 resolutions that land outside the current module:
 
 ```rust,no_run
 use pe_sigscan::{module_size, resolve_rel32_at};

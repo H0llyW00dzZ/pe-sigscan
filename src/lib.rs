@@ -134,6 +134,30 @@ pub use crate::scan::{
     find_in_text, iter_in_exec_sections, iter_in_slice, iter_in_text, Matches, SliceMatches,
 };
 
+// Section-targeted scanners + module_size (feature `section-info`).
+//
+// `find_in_section` / `count_in_section` / `iter_in_section` live in
+// `scan.rs` alongside the always-available scanners; they're the
+// same shape as `find_in_text` etc. but take a section name as a
+// parameter, letting callers scan inside `.rdata`, `.pdata`,
+// `.text$mn`, etc. Internally they delegate to `crate::pe::find_section`.
+//
+// `module_size` is a standalone reader for
+// `IMAGE_OPTIONAL_HEADER.SizeOfImage` — useful for cross-module
+// rel32 disambiguation. Re-exported at the crate root because it
+// isn't a scanner shape and doesn't fit alongside the named-scan
+// scanners.
+//
+// Both sources delegate to the shared header-walker
+// (`parse_pe_headers` / `iter_sections` / `find_section`) in
+// `crate::pe`, so the section-info feature adds public surface
+// without duplicating any walking logic.
+#[cfg(feature = "section-info")]
+pub use crate::pe::module_size;
+
+#[cfg(feature = "section-info")]
+pub use crate::scan::{count_in_section, find_in_section, iter_in_section};
+
 // ---------------------------------------------------------------------------
 // pattern! macro
 // ---------------------------------------------------------------------------

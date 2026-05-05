@@ -25,6 +25,13 @@ accessible code by its byte signature.
   walk every section whose `IMAGE_SCN_MEM_EXECUTE` characteristic is set
   (required for some compilers / linkers that split code into companion
   sections like `.text$mn`).
+- **Section-targeted scanning** (optional, `section-info` feature). Lifts
+  the `.text` / executable-only restriction: `find_in_section`,
+  `count_in_section`, and `iter_in_section` scan any named section by
+  prefix, so you can locate string literals or vtables in `.rdata`,
+  runtime globals in `.data`, exception unwind data in `.pdata`, and so
+  on. The same feature exposes `module_size` for cross-module rel32 range
+  checks. Zero impact on the default build.
 - **Hook-install uniqueness**: companion `count_*` functions let you verify
   a pattern matches exactly once before patching, so you never silently
   hook the wrong function.
@@ -180,6 +187,60 @@ const SIG: &[Option<u8>] = pattern![0x48, 0x8B, _, _, _, _, 0xFF, 0xE0];
 let addr = find_in_exec_sections(module_base, SIG);
 ```
 
+### Scanning a specific section (optional)
+
+Enable the `section-info` feature when the bytes you're after live
+outside any executable section — string literals and vtables in
+`.rdata`, runtime globals in `.data`, exception unwind data in `.pdata`:
+
+```toml
+[dependencies]
+pe-sigscan = { version = "0.3", features = ["section-info"] }
+```
+
+```rust,no_run
+use pe_sigscan::{find_in_section, iter_in_section, pattern};
+# let module_base: usize = 0;
+
+// UTF-16LE "Hello" — typical .rdata literal layout.
+const HELLO_W: &[Option<u8>] = pattern![
+    b'H', 0x00, b'e', 0x00, b'l', 0x00, b'l', 0x00, b'o', 0x00,
+];
+
+if let Some(addr) = find_in_section(module_base, b".rdata", HELLO_W) {
+    println!("string at {addr:#x}");
+}
+
+// Or iterate every match in a chosen section:
+const VTBL_ENTRY: &[Option<u8>] = pattern![_, _, _, _, _, _, _, _];
+for addr in iter_in_section(module_base, b".rdata", VTBL_ENTRY) {
+    let _ = addr;
+}
+```
+
+Section names are matched against the 8-byte on-disk name field by
+prefix, so `b".rdata"` also catches suffix-tagged variants like
+`.rdata$zz`.
+
+The same feature also exposes `module_size`, which reads `SizeOfImage`
+from the optional header. Useful for filtering rel32 resolutions that
+land outside the current module:
+
+```rust,no_run
+use pe_sigscan::{module_size, resolve_rel32_at};
+# let module_base: usize = 0;
+# let match_addr: usize = 0;
+
+if let Some(size) = module_size(module_base) {
+    let target = unsafe { resolve_rel32_at(match_addr, 1, 5) };
+    if (module_base..module_base + size).contains(&target) {
+        // in-module call — proceed
+    } else {
+        // jumps into another module (e.g. an import thunk) — different handling
+    }
+}
+```
+
 ### Offline analysis (no loaded PE required)
 
 ```rust
@@ -274,11 +335,16 @@ code or data inside PE modules:
 - Finding function addresses to hook in `.text` or other executable sections
 - Signature-based offset scanning (instead of hardcoding addresses)
 - Verifying pattern uniqueness before installing hooks using the `count_*` functions
+- Locating string literals, vtables, and configuration tables in `.rdata`
+  via the `section-info` feature (e.g. fingerprinting a specific game
+  build by a known UTF-16LE error message)
 
 ### Reverse Engineering
 - Quickly locating functions and data structures without relying on debug symbols
 - Building custom signature databases for repeated binary analysis
 - Supporting IDA/Ghidra-style workflows programmatically
+- Cross-module rel32 disambiguation with `module_size` (in-module call vs.
+  call into an import thunk vs. tail-call into another module)
 
 ### Malware Analysis & Security Research
 - Detecting known malicious code patterns or unpacker stubs
@@ -329,6 +395,81 @@ have mapped manually.
 ## MSRV
 
 Rust 1.70.
+
+## Legal
+
+`pe-sigscan` is a byte-pattern matching primitive. The same operation
+backs antivirus engines, EDR products, performance profilers, kernel
+debuggers (WinDbg, x64dbg), malware-analysis sandboxes, and
+reverse-engineering toolkits (IDA, Ghidra, Binary Ninja, Frida). The
+crate ships no exploits, no copyright-circumvention logic, and no
+memory-write or code-injection helpers — it reads bytes you can already
+read in your own process and reports where a pattern matches.
+
+### Legitimate use
+
+The categories listed under [Use Cases](#use-cases) — game modding,
+in-process tooling, reverse engineering, malware analysis, security
+research, and debugging — are well-established forms of software
+engineering and research with explicit legal grounding:
+
+- **United States.** Reverse engineering for interoperability,
+  compatibility analysis, and security research is established case law
+  (*Sega Enterprises Ltd. v. Accolade, Inc.*, 977 F.2d 1510 (9th Cir.
+  1992); *Sony Computer Entertainment v. Connectix Corp.*, 203 F.3d 596
+  (9th Cir. 2000)). 17 U.S.C. § 117 permits the owner of a software
+  copy to make adaptations needed to use it. DMCA § 1201(f) explicitly
+  permits reverse engineering of computer programs for interoperability.
+  Modding, debugging, and analysis workflows that don't reproduce or
+  redistribute the underlying program generally fall well inside these
+  protections.
+- **European Union.** Directive 2009/24/EC Article 6 codifies a
+  near-identical reverse-engineering-for-interoperability right; Article
+  5(3) permits observation, study, and testing of program function.
+- **Other jurisdictions.** Laws vary. Germany's § 202c StGB
+  ("Hackerparagraph"), South Korea's Game Industry Promotion Act
+  (which criminalises certain anti-cheat circumvention), and analogous
+  statutes elsewhere may apply more restrictively to specific
+  categories — notably online-game cheating, unauthorized access to
+  computer systems, or circumvention of technological protection
+  measures. Check your local statute if your use case touches those
+  areas.
+
+### Responsibility
+
+What you do with the matched addresses is on you, not on the tool.
+Reading the memory of a process you own and run is generally lawful in
+the jurisdictions above. Using the results to:
+
+- **Modify a single-player game, hot-patch your own software, or
+  fingerprint code for a debugger or analysis tool** — typically
+  lawful.
+- **Cheat in an online multiplayer game** — usually breaches the
+  game's Terms of Service. This is generally a civil/contract matter
+  (account bans, possible civil suits — see e.g. *Bungie, Inc. v.
+  AimJunkies.com et al.*, W.D. Wash.), not a criminal one in most
+  Western jurisdictions, but the answer differs in others.
+- **Bypass a Technological Protection Measure on copyrighted
+  content** — may engage DMCA § 1201, EU Copyright Directive Article
+  6, or equivalent foreign provisions, depending on what specifically
+  is bypassed.
+- **Access a system you don't own or aren't authorised to use** —
+  likely violates the U.S. Computer Fraud and Abuse Act (18 U.S.C.
+  § 1030) or an equivalent foreign statute, regardless of what tool
+  you used.
+
+### Disclaimer
+
+This section is a high-level summary intended to help you decide
+whether to investigate your specific situation further. It is **not
+legal advice.** If your intended use sits anywhere near a grey area,
+consult a qualified attorney in your jurisdiction.
+
+The project is published and maintained as a general-purpose software
+engineering library. The maintainers don't endorse, condone, or
+provide support for use against systems the user doesn't own, or
+against the published Terms of Service of any product. Issue reports
+and pull requests focused on such use will be closed without comment.
 
 ## License
 

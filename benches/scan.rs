@@ -23,8 +23,9 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use pe_sigscan::{
-    count_in_slice, find_in_slice, iter_in_slice, pattern, read_rel32, resolve_rel32,
-    resolve_rel32_at, Pattern,
+    count_in_exec_sections, count_in_slice, find_in_exec_sections, find_in_slice,
+    iter_in_exec_sections, iter_in_slice, pattern, read_rel32, resolve_rel32, resolve_rel32_at,
+    Pattern,
 };
 use std::hint::black_box;
 
@@ -64,12 +65,77 @@ fn plant(haystack: &mut [u8], at: usize, pat_bytes: &[u8]) {
     haystack[at..at + pat_bytes.len()].copy_from_slice(pat_bytes);
 }
 
+/// Scrub a haystack so it provably contains zero matches for `pat`.
+///
+/// The random generators above produce uniform bytes — the chance of an
+/// accidental match for a typical 7+ byte signature is astronomically
+/// small (~1/2^48 per offset for a 6-fixed-byte pattern), but "small"
+/// is not "zero", and a future seed change or pattern tweak could
+/// silently flip a `find_in_slice` bench from "sweeps full buffer" to
+/// "early-exits after 1 KiB" — which would produce nonsense throughput
+/// numbers without failing any assertion.
+///
+/// This walker forces the no-match property explicitly: at every offset
+/// where the fixed bytes of `pat` happen to align, it flips one of
+/// them. The anchor (first fixed byte) is preserved so the pre-filter
+/// still hits at the same density — only the post-anchor full-match
+/// check is guaranteed to fail.
+///
+/// Idempotent: calling this twice produces the same result as calling
+/// it once.
+fn scrub_matches(haystack: &mut [u8], pat: &[Option<u8>]) {
+    let n = haystack.len();
+    let m = pat.len();
+    if m == 0 || n < m {
+        return;
+    }
+    // Find the second fixed-byte position in the pattern, if any. We
+    // flip *that* one (rather than the anchor) so the anchor density
+    // — the thing the pre-filter is benchmarked against — is
+    // preserved exactly.
+    let flip_idx = match pat.iter().enumerate().filter(|(_, b)| b.is_some()).nth(1) {
+        Some((idx, _)) => idx,
+        // Pattern has 0 or 1 fixed bytes — flipping the anchor is the
+        // only option. Acceptable: with only one fixed byte this is
+        // effectively a single-byte search and the bench shouldn't be
+        // using such a pattern with this scrubber anyway.
+        None => match pat.iter().position(|b| b.is_some()) {
+            Some(idx) => idx,
+            None => return, // all-wildcard pattern: every offset matches; nothing to scrub
+        },
+    };
+    let flip_byte = pat[flip_idx].expect("flip_idx points at Some by construction");
+    let replacement = flip_byte.wrapping_add(1); // any byte that isn't `flip_byte`
+
+    'outer: for i in 0..=n - m {
+        for (k, expected) in pat.iter().enumerate() {
+            if let Some(b) = expected {
+                if haystack[i + k] != *b {
+                    continue 'outer;
+                }
+            }
+        }
+        // All fixed bytes line up here — break the match by flipping
+        // the chosen position.
+        haystack[i + flip_idx] = replacement;
+    }
+}
+
 // ----------------------------------------------------------------------
 // Benchmarks
 // ----------------------------------------------------------------------
 
 /// `find_in_slice` across multiple haystack sizes and content types,
 /// measured as throughput so all sizes can be compared on the same axis.
+///
+/// The bench name is "no_hit" — and we *enforce* that, rather than
+/// hoping the random distribution doesn't accidentally produce one.
+/// `find_in_slice` early-exits on first match, so a single stray hit
+/// anywhere in a 64 MiB buffer would invalidate the throughput axis
+/// silently. The `random` haystacks are passed through `scrub_matches`
+/// to guarantee zero full matches while preserving the anchor-byte
+/// density (so the pre-filter still does its work). The `zero`
+/// haystacks need no scrubbing — the anchor byte never appears.
 fn bench_find_no_hit(c: &mut Criterion) {
     // 8-byte pattern with one wildcard — typical cheat sig.
     let pat = pattern!(0x48, 0x8B, 0x05, _, _, _, _, 0x48);
@@ -83,7 +149,12 @@ fn bench_find_no_hit(c: &mut Criterion) {
             b.iter(|| find_in_slice(black_box(h), black_box(pat)))
         });
 
-        let rand = random_haystack(size, 0xDEAD_BEEF);
+        let mut rand = random_haystack(size, 0xDEAD_BEEF);
+        scrub_matches(&mut rand, pat);
+        assert!(
+            find_in_slice(&rand, pat).is_none(),
+            "find_no_hit bench requires a no-match haystack post-scrub"
+        );
         group.bench_with_input(BenchmarkId::new("random", size), &rand, |b, h| {
             b.iter(|| find_in_slice(black_box(h), black_box(pat)))
         });
@@ -212,12 +283,28 @@ fn bench_pattern_length(c: &mut Criterion) {
 /// iterator state machine (cursor / `pat_len == 0` short-circuits, etc.)
 /// and is the signal to dig in.
 fn bench_iter_in_slice(c: &mut Criterion) {
-    // 8 MiB random haystack — anchor byte (0x48) hits ~32k times, of
-    // which only a handful pass the full pattern check. Realistic for a
-    // signature with one wildcard.
+    // 8 MiB random haystack, deterministically scrubbed to contain
+    // **zero** full matches for `pat`. Anchor byte (0x48) still hits
+    // ~32k times — the post-anchor check is what gets defeated, not
+    // the pre-filter density. Realistic for a signature with one
+    // wildcard.
+    //
+    // **Why scrub explicitly** instead of "the chance of a random
+    // match is small enough"?  Both `iter_next` and `find_in_slice
+    // (reference)` early-exit on the first match, so a single
+    // accidental hit somewhere in the buffer would silently flip the
+    // reported `Throughput::Bytes(size)` from "scanned 8 MiB" to
+    // "scanned 1 KiB and called it 8 MiB" — the bench would keep
+    // producing numbers, just nonsense ones. Scrubbing turns that
+    // failure mode into an `assert!` rather than a misleading graph.
     let size = 8 << 20;
-    let buf = random_haystack(size, 0xBABE_FACE);
+    let mut buf = random_haystack(size, 0xBABE_FACE);
     let pat = pattern!(0x48, 0x8B, 0x05, _, _, _, _, 0x48);
+    scrub_matches(&mut buf, pat);
+    assert!(
+        find_in_slice(&buf, pat).is_none(),
+        "iter_in_slice bench requires a no-match haystack post-scrub"
+    );
 
     let mut group = c.benchmark_group("iter_in_slice");
     group.throughput(Throughput::Bytes(size as u64));
@@ -342,12 +429,22 @@ fn bench_rel32_helpers(c: &mut Criterion) {
 
     // read_rel32: safe slice variant. Slightly more expensive due to
     // bounds-checking, but still single-load on the happy path.
+    //
+    // Computes the same absolute-target value the two `resolve_rel32*`
+    // benches above do, so the per-element work is comparable across
+    // all three variants and the throughput numbers are meaningful as a
+    // direct head-to-head. (An earlier version of this bench
+    // accumulated only the raw displacement, which made `read_rel32`
+    // appear faster than `resolve_rel32_at` despite the bounds check —
+    // an artifact of doing strictly less arithmetic per iteration.)
     group.bench_function("read_rel32", |b| {
         b.iter(|| {
-            let mut acc: i64 = 0;
+            let mut acc: usize = 0;
             for i in 0..N {
                 let off = i * INSTR_LEN;
-                acc = acc.wrapping_add(read_rel32(black_box(&buf), off + 1).unwrap_or(0) as i64);
+                let next_ip = base + off + INSTR_LEN;
+                let disp = read_rel32(black_box(&buf), off + 1).unwrap_or(0) as isize;
+                acc = acc.wrapping_add((next_ip as isize).wrapping_add(disp) as usize);
             }
             black_box(acc)
         })
@@ -456,69 +553,151 @@ fn bench_pattern_parse(c: &mut Criterion) {
 }
 
 // ----------------------------------------------------------------------
-// First-byte search (fastscan hot path)
+// Multi-section executable scanning against a real synthetic PE
 // ----------------------------------------------------------------------
 
-fn bench_first_byte_search(c: &mut Criterion) {
-    let mut group = c.benchmark_group("first_byte_search");
-    let haystack: Vec<u8> = (0..1024 * 1024).map(|i| (i % 251) as u8).collect();
-    let needle = 0xDE;
+/// `IMAGE_SCN_MEM_EXECUTE` — section is executable. Mirrored here so
+/// the bench file doesn't reach into crate internals.
+const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
 
-    group.throughput(Throughput::Bytes(haystack.len() as u64));
-    group.bench_function("first_byte_in_slice", |b| {
-        b.iter(|| pe_sigscan::find_in_slice(black_box(&haystack), black_box(&[Some(needle)])))
-    });
+/// Build a minimal PE-shaped buffer that the crate's PE walker will
+/// accept, then place the supplied section payloads at their declared
+/// virtual addresses.
+///
+/// Each entry is `(name_8b, virtual_address, payload, characteristics)`.
+/// Only the header fields the parser actually reads are populated — this
+/// is **not** a loadable image, just a faithful reproduction of the
+/// in-memory layout from a `module_base` perspective.
+///
+/// Used to drive `find_in_exec_sections` / `count_in_exec_sections` /
+/// `iter_in_exec_sections` from a benchmark without needing a real DLL
+/// on disk and without porting `module_base` semantics (it just feeds
+/// `buf.as_ptr() as usize`, which is exactly what the in-process API
+/// receives at runtime).
+fn make_synthetic_pe(sections: &[([u8; 8], u32, Vec<u8>, u32)]) -> Vec<u8> {
+    // Buffer must be large enough for every section's
+    // `virtual_address + payload.len()` to fit.
+    let needed = sections
+        .iter()
+        .map(|(_, vaddr, bytes, _)| *vaddr as usize + bytes.len())
+        .max()
+        .unwrap_or(0)
+        .max(0x400);
+    let mut buf = vec![0u8; needed];
+    // DOS header MZ at +0.
+    buf[0] = b'M';
+    buf[1] = b'Z';
+    // e_lfanew at +0x3C → NT headers at 0x80.
+    let nt_offset: u32 = 0x80;
+    buf[0x3C..0x40].copy_from_slice(&nt_offset.to_le_bytes());
+    let nt = nt_offset as usize;
+    // NT signature 'PE\0\0' at NT+0.
+    buf[nt..nt + 4].copy_from_slice(b"PE\0\0");
+    // FILE_HEADER at NT+4: NumberOfSections (u16) at +2.
+    let num_sections: u16 = sections.len() as u16;
+    buf[nt + 4 + 2..nt + 4 + 4].copy_from_slice(&num_sections.to_le_bytes());
+    // SizeOfOptionalHeader (u16) at +16 = 0xF0 (typical PE32+).
+    let opt_size: u16 = 0xF0;
+    buf[nt + 4 + 16..nt + 4 + 18].copy_from_slice(&opt_size.to_le_bytes());
+    // Section table starts at NT+4+20+opt_size.
+    let section_table = nt + 4 + 20 + opt_size as usize;
 
-    group.finish();
+    for (i, (name, vaddr, bytes, characteristics)) in sections.iter().enumerate() {
+        let sec = section_table + i * 40;
+        buf[sec..sec + 8].copy_from_slice(name);
+        let vsize: u32 = bytes.len() as u32;
+        buf[sec + 8..sec + 12].copy_from_slice(&vsize.to_le_bytes());
+        buf[sec + 12..sec + 16].copy_from_slice(&vaddr.to_le_bytes());
+        buf[sec + 36..sec + 40].copy_from_slice(&characteristics.to_le_bytes());
+        let v = *vaddr as usize;
+        buf[v..v + bytes.len()].copy_from_slice(bytes);
+    }
+    buf
 }
 
-// ----------------------------------------------------------------------
-// Multi-section executable scanning (pe + scan)
-// ----------------------------------------------------------------------
+/// End-to-end scan against a synthetic PE with three executable
+/// sections (`.text`, `.text$mn`, `.textbss`) plus a non-executable
+/// `.data` section that must be skipped. This is the only bench that
+/// actually exercises the PE-walking entry points
+/// (`find_in_exec_sections` / `count_in_exec_sections` /
+/// `iter_in_exec_sections`); every other bench in this file operates on
+/// raw slices.
+///
+/// Layout:
+///
+/// - `.text`     :  4 MiB, exec, contains 1 planted match near the end
+/// - `.text$mn`  :  2 MiB, exec, contains 1 planted match in the middle
+/// - `.textbss`  :  1 MiB, exec, no matches (worst-case sweep)
+/// - `.data`     : 512 KiB, **non-exec**, contains a "decoy" pattern
+///   that must NOT be found (verifies the section filter is honoured)
+///
+/// Total executable bytes scanned: 7 MiB. Throughput is reported
+/// against that figure, *not* the full buffer size — the data section
+/// is skipped by the scanner and including its bytes would understate
+/// the real per-byte throughput.
+fn bench_synthetic_pe_exec_sections(c: &mut Criterion) {
+    const TEXT_SIZE: usize = 4 << 20;
+    const TEXT_MN_SIZE: usize = 2 << 20;
+    const TEXT_BSS_SIZE: usize = 1 << 20;
+    const DATA_SIZE: usize = 512 << 10;
+    const EXEC_TOTAL: usize = TEXT_SIZE + TEXT_MN_SIZE + TEXT_BSS_SIZE;
 
-fn bench_exec_sections(c: &mut Criterion) {
-    let mut group = c.benchmark_group("exec_sections");
-    let haystack: Vec<u8> = (0..1024 * 1024).map(|i| (i % 251) as u8).collect();
-    let pat = pattern![0xDE, _, _, _, 0xBE];
+    // Random payloads — anchor byte (0x48) hits ~1/256 offsets, same
+    // shape as the slice benches above.
+    let mut text = random_haystack(TEXT_SIZE, 0xA1A1_A1A1);
+    let mut text_mn = random_haystack(TEXT_MN_SIZE, 0xB2B2_B2B2);
+    let text_bss = random_haystack(TEXT_BSS_SIZE, 0xC3C3_C3C3);
+    let mut data = random_haystack(DATA_SIZE, 0xD4D4_D4D4);
 
-    group.throughput(Throughput::Bytes(haystack.len() as u64));
+    // Plant a guaranteed match near the end of `.text` and in the
+    // middle of `.text$mn`. Pattern: `48 8B 05 ?? ?? ?? ?? 48`.
+    let planted = [0x48, 0x8B, 0x05, 0xAA, 0xBB, 0xCC, 0xDD, 0x48];
+    plant(&mut text, TEXT_SIZE - 4096, &planted);
+    plant(&mut text_mn, TEXT_MN_SIZE / 2, &planted);
+    // Plant a decoy inside the **non-executable** `.data` section. If
+    // the scanner ever finds it, the section filter is broken — the
+    // assertion in `verify_match_count_correctness` (below) will fire.
+    plant(&mut data, DATA_SIZE / 2, &planted);
+
+    // Section virtual addresses. The synthetic-PE helper places the
+    // headers at the start of the buffer; we leave a 0x1000-byte gap
+    // before `.text` so headers and section payloads don't overlap.
+    let text_va: u32 = 0x1000;
+    let text_mn_va: u32 = text_va + TEXT_SIZE as u32;
+    let text_bss_va: u32 = text_mn_va + TEXT_MN_SIZE as u32;
+    let data_va: u32 = text_bss_va + TEXT_BSS_SIZE as u32;
+
+    let buf = make_synthetic_pe(&[
+        (*b".text\0\0\0", text_va, text, IMAGE_SCN_MEM_EXECUTE),
+        (*b".text$mn", text_mn_va, text_mn, IMAGE_SCN_MEM_EXECUTE),
+        (*b".textbss", text_bss_va, text_bss, IMAGE_SCN_MEM_EXECUTE),
+        (*b".data\0\0\0", data_va, data, 0), // not executable
+    ]);
+    let module_base = buf.as_ptr() as usize;
+    let pat = pattern!(0x48, 0x8B, 0x05, _, _, _, _, 0x48);
+
+    // Sanity check: exactly 2 matches across exec sections, and the
+    // decoy in `.data` must not be counted. If this fires the bench is
+    // measuring the wrong thing.
+    assert_eq!(
+        count_in_exec_sections(module_base, pat),
+        2,
+        "synthetic PE bench expected exactly 2 exec-section matches; \
+         either the planted match was clobbered or the section filter \
+         leaked into .data",
+    );
+
+    let mut group = c.benchmark_group("synthetic_pe_exec_sections");
+    group.throughput(Throughput::Bytes(EXEC_TOTAL as u64));
+
     group.bench_function("find_in_exec_sections", |b| {
-        b.iter(|| find_in_slice(black_box(&haystack), black_box(pat)))
+        b.iter(|| find_in_exec_sections(black_box(module_base), black_box(pat)))
     });
     group.bench_function("count_in_exec_sections", |b| {
-        b.iter(|| count_in_slice(black_box(&haystack), black_box(pat)))
+        b.iter(|| count_in_exec_sections(black_box(module_base), black_box(pat)))
     });
-
-    group.finish();
-}
-
-// ----------------------------------------------------------------------
-// Synthetic PE multi-section scenarios
-// ----------------------------------------------------------------------
-
-fn bench_synthetic_pe(c: &mut Criterion) {
-    let mut group = c.benchmark_group("synthetic_pe");
-    // Simulate a PE with .text + .text$mn + .textbss style layout
-    let mut buf = vec![0u8; 512 * 1024];
-    // Plant matches in different "sections"
-    buf[100] = 0x48;
-    buf[101] = 0x8B;
-    buf[200_000] = 0x48;
-    buf[200_001] = 0x8B;
-    buf[400_000] = 0x48;
-    buf[400_001] = 0x8B;
-
-    let pat = pattern![0x48, 0x8B, _, _];
-
-    group.throughput(Throughput::Bytes(buf.len() as u64));
-    group.bench_function("find_across_sections", |b| {
-        b.iter(|| find_in_slice(black_box(&buf), black_box(pat)))
-    });
-    group.bench_function("count_across_sections", |b| {
-        b.iter(|| count_in_slice(black_box(&buf), black_box(pat)))
-    });
-    group.bench_function("iter_across_sections", |b| {
-        b.iter(|| iter_in_slice(black_box(&buf), black_box(pat)).count())
+    group.bench_function("iter_in_exec_sections_count", |b| {
+        b.iter(|| iter_in_exec_sections(black_box(module_base), black_box(pat)).count())
     });
 
     group.finish();
@@ -577,9 +756,7 @@ criterion_group! {
         bench_rel32_helpers,
         bench_scan_and_resolve,
         bench_pattern_parse,
-        bench_first_byte_search,
-        bench_exec_sections,
-        bench_synthetic_pe,
+        bench_synthetic_pe_exec_sections,
         bench_fastscan_primitives,
 }
 criterion_main!(benches);

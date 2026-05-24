@@ -1,14 +1,14 @@
 //! # pe-sigscan
 //!
-//! Fast in-process byte-pattern ("signature") scanning over the executable
-//! sections of a loaded PE (Portable Executable) module on Windows.
+//! Fast byte-pattern ("signature") scanning over the executable sections of a
+//! loaded PE (Portable Executable) module on Windows.
 //!
 //! This crate is a building block for game mods, hookers, debuggers, and any
-//! other in-process tool that needs to locate non-exported, non-vtable-
-//! accessible code by its byte signature. It mirrors the workflow common
-//! across the reverse-engineering ecosystem — derive a pattern from a
-//! disassembler (IDA, Ghidra, Binary Ninja, Cutter), then scan the live
-//! process's mapped image for it at runtime.
+//! other tool that needs to locate non-exported, non-vtable-accessible code by
+//! its byte signature. It mirrors the workflow common across the
+//! reverse-engineering ecosystem — derive a pattern from a disassembler (IDA,
+//! Ghidra, Binary Ninja, Cutter), then scan either the live process's mapped
+//! image or bytes read through a custom backend.
 //!
 //! ## Quick start
 //!
@@ -112,8 +112,12 @@
 //! concern; bytes don't change between reads. A typical scan walks tens of
 //! megabytes of bytes — routing every probe through `ReadProcessMemory`
 //! would cost tens of millions of syscalls (minutes of wall time). This
-//! crate reads directly via raw pointer dereference, bounded to PE-declared
-//! section ranges.
+//! crate's in-process path reads directly via raw pointer dereference, bounded
+//! to PE-declared section ranges.
+//!
+//! For out-of-process backends, use the reader-backed `*_with` APIs. Those
+//! copy the target section bytes once into local memory, then reuse the same
+//! slice scanner as [`find_in_slice`].
 //!
 //! ## Safety
 //!

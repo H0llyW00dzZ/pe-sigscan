@@ -864,6 +864,33 @@ mod tests {
     }
 
     #[test]
+    fn reader_exec_sections_returns_none_when_no_match() {
+        let body_a = [0xAAu8, 0xBB];
+        let body_b = [0xCCu8, 0xDD];
+        let reader = SliceReader {
+            base: 0x6100_0000,
+            bytes: synthetic_pe(&[
+                (*b".text\0\0\0", 0x300, &body_a, IMAGE_SCN_MEM_EXECUTE),
+                (*b".text$mn", 0x310, &body_b, IMAGE_SCN_MEM_EXECUTE),
+            ]),
+        };
+        let pat = pattern![0x90, 0x90, 0xC3];
+
+        assert!(find_in_exec_sections_with(&reader, reader.base, pat).is_none());
+    }
+
+    #[test]
+    fn reader_exec_sections_count_returns_zero_for_malformed_module() {
+        let reader = SliceReader {
+            base: 0x6100_0000,
+            bytes: vec![0u8; 0x400],
+        };
+        let pat = pattern![0x90];
+
+        assert_eq!(count_in_exec_sections_with(&reader, reader.base, pat), 0);
+    }
+
+    #[test]
     fn reader_variants_return_none_or_zero_for_zero_base_and_empty_pattern() {
         let reader = SliceReader {
             base: 0x6000_0000,
@@ -970,6 +997,41 @@ mod tests {
         assert_eq!(
             count_in_section_with(&reader, reader.base, b".text$mn", pat),
             1
+        );
+    }
+
+    #[cfg(feature = "section-info")]
+    #[test]
+    fn reader_section_info_guard_paths_return_none_or_zero() {
+        let reader = SliceReader {
+            base: 0x6200_0000,
+            bytes: vec![0u8; 0x400],
+        };
+        let pat = pattern![0x90];
+        let empty: &[Option<u8>] = &[];
+
+        assert!(find_in_section_with(&reader, 0, b".rdata", pat).is_none());
+        assert_eq!(count_in_section_with(&reader, 0, b".rdata", pat), 0);
+        assert!(find_in_section_with(&reader, reader.base, b".rdata", empty).is_none());
+        assert_eq!(
+            count_in_section_with(&reader, reader.base, b".rdata", empty),
+            0
+        );
+    }
+
+    #[cfg(feature = "section-info")]
+    #[test]
+    fn reader_section_info_count_returns_zero_when_section_missing() {
+        let body = [0x90u8];
+        let reader = SliceReader {
+            base: 0x6200_0000,
+            bytes: synthetic_pe(&[(*b".text\0\0\0", 0x300, &body, IMAGE_SCN_MEM_EXECUTE)]),
+        };
+        let pat = pattern![0x90];
+
+        assert_eq!(
+            count_in_section_with(&reader, reader.base, b".rdata", pat),
+            0
         );
     }
 

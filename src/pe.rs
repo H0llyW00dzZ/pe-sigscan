@@ -507,6 +507,60 @@ mod tests {
         assert_eq!(hdr.section_table, buf.as_ptr() as usize + 0x80 + 24 + 0xF0);
     }
 
+    #[test]
+    fn parse_pe_headers_with_returns_none_for_zero_base() {
+        let reader = SliceReader {
+            base: 0x5000_0000,
+            bytes: vec![0u8; 0x400],
+        };
+        assert!(parse_pe_headers_with(&reader, 0).is_none());
+    }
+
+    #[test]
+    fn parse_pe_headers_with_returns_none_for_missing_mz() {
+        let reader = SliceReader {
+            base: 0x5000_0000,
+            bytes: vec![0u8; 0x400],
+        };
+        assert!(parse_pe_headers_with(&reader, reader.base).is_none());
+    }
+
+    #[test]
+    fn parse_pe_headers_with_returns_none_for_short_dos_header() {
+        let reader = SliceReader {
+            base: 0x5000_0000,
+            bytes: vec![b'M', b'Z'],
+        };
+        assert!(parse_pe_headers_with(&reader, reader.base).is_none());
+    }
+
+    #[test]
+    fn parse_pe_headers_with_returns_none_for_missing_pe_sig() {
+        let mut bytes = vec![0u8; 0x400];
+        bytes[0] = b'M';
+        bytes[1] = b'Z';
+        let nt_offset: u32 = 0x80;
+        bytes[0x3C..0x40].copy_from_slice(&nt_offset.to_le_bytes());
+        let reader = SliceReader {
+            base: 0x5000_0000,
+            bytes,
+        };
+        assert!(parse_pe_headers_with(&reader, reader.base).is_none());
+    }
+
+    #[test]
+    fn parse_pe_headers_with_walks_to_section_table() {
+        let body = [0x90u8];
+        let reader = SliceReader {
+            base: 0x5000_0000,
+            bytes: synthetic_pe(&[(*b".text\0\0\0", 0x300, &body, IMAGE_SCN_MEM_EXECUTE)]),
+        };
+        let hdr = parse_pe_headers_with(&reader, reader.base).unwrap();
+        assert_eq!(hdr.num_sections, 1);
+        assert_eq!(hdr.module_base, reader.base);
+        assert_eq!(hdr.section_table, reader.base + 0x80 + 24 + 0xF0);
+    }
+
     // -- iter_sections / find_section -------------------------------------
 
     #[test]
@@ -687,6 +741,71 @@ mod tests {
         assert!(secs.is_empty());
     }
 
+    #[test]
+    fn iter_sections_with_and_helpers_work_for_remote_reader() {
+        let exec_body = [0x90u8, 0xC3];
+        let data_body = [0xAAu8, 0xBB];
+        let reader = SliceReader {
+            base: 0x5000_0000,
+            bytes: synthetic_pe(&[
+                (*b".text\0\0\0", 0x300, &exec_body, IMAGE_SCN_MEM_EXECUTE),
+                (*b".data\0\0\0", 0x310, &data_body, IMAGE_SCN_MEM_READ),
+            ]),
+        };
+
+        let sections = iter_sections_with(&reader, reader.base).unwrap();
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].virtual_address, reader.base + 0x300);
+        assert_eq!(
+            find_section_with(&reader, reader.base, b".text")
+                .unwrap()
+                .virtual_address,
+            reader.base + 0x300,
+        );
+        assert_eq!(
+            text_section_bounds_with(&reader, reader.base),
+            Some((reader.base + 0x300, exec_body.len())),
+        );
+        assert_eq!(
+            exec_sections_with(&reader, reader.base),
+            Some(vec![(reader.base + 0x300, exec_body.len())]),
+        );
+    }
+
+    #[test]
+    fn iter_sections_with_returns_none_when_section_header_read_fails() {
+        let body = [0x90u8];
+        let mut bytes = synthetic_pe(&[(*b".text\0\0\0", 0x300, &body, IMAGE_SCN_MEM_EXECUTE)]);
+        bytes.truncate(0x188 + 39);
+        let reader = SliceReader {
+            base: 0x5000_0000,
+            bytes,
+        };
+
+        assert!(iter_sections_with(&reader, reader.base).is_none());
+        assert!(find_section_with(&reader, reader.base, b".text").is_none());
+        assert!(text_section_bounds_with(&reader, reader.base).is_none());
+        assert!(exec_sections_with(&reader, reader.base).is_none());
+    }
+
+    #[test]
+    fn slice_reader_rejects_underflow_overflow_and_oob_reads() {
+        let reader = SliceReader {
+            base: 0x10,
+            bytes: vec![0u8; 4],
+        };
+        let mut buf = [0u8; 2];
+
+        assert!(reader.read_bytes(reader.base - 1, &mut buf).is_none());
+        assert!(reader.read_bytes(reader.base + 3, &mut buf).is_none());
+
+        let overflow_reader = SliceReader {
+            base: 0,
+            bytes: vec![0u8; 4],
+        };
+        assert!(overflow_reader.read_bytes(usize::MAX, &mut buf).is_none());
+    }
+
     // -- module_size (feature `section-info`) ----------------------------
 
     #[cfg(feature = "section-info")]
@@ -764,6 +883,20 @@ mod tests {
                 bytes,
             };
             assert_eq!(module_size_with(&reader, reader.base), Some(expected));
+        }
+
+        #[test]
+        fn module_size_with_returns_none_when_size_of_image_read_is_truncated() {
+            let body = [0x90u8];
+            let mut bytes = synthetic_pe(&[(*b".text\0\0\0", 0x300, &body, IMAGE_SCN_MEM_EXECUTE)]);
+            let size_of_image_offset = 0x80 + 24 + 56;
+            bytes.truncate(size_of_image_offset + 3);
+            let reader = super::SliceReader {
+                base: 0x5000_0000,
+                bytes,
+            };
+
+            assert!(module_size_with(&reader, reader.base).is_none());
         }
     }
 }

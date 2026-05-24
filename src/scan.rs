@@ -863,6 +863,94 @@ mod tests {
         assert_eq!(count_in_exec_sections_with(&reader, reader.base, pat), 1);
     }
 
+    #[test]
+    fn reader_variants_return_none_or_zero_for_zero_base_and_empty_pattern() {
+        let reader = SliceReader {
+            base: 0x6000_0000,
+            bytes: vec![0u8; 0x400],
+        };
+        let pat = pattern![0x48];
+        let empty: &[Option<u8>] = &[];
+
+        assert!(find_in_text_with(&reader, 0, pat).is_none());
+        assert_eq!(count_in_text_with(&reader, 0, pat), 0);
+        assert!(find_in_exec_sections_with(&reader, 0, pat).is_none());
+        assert_eq!(count_in_exec_sections_with(&reader, 0, pat), 0);
+
+        assert!(find_in_text_with(&reader, reader.base, empty).is_none());
+        assert_eq!(count_in_text_with(&reader, reader.base, empty), 0);
+        assert!(find_in_exec_sections_with(&reader, reader.base, empty).is_none());
+        assert_eq!(count_in_exec_sections_with(&reader, reader.base, empty), 0);
+    }
+
+    #[test]
+    fn reader_text_variants_return_none_or_zero_when_text_missing() {
+        let body = [0x48u8, 0x8B];
+        let reader = SliceReader {
+            base: 0x6000_0000,
+            bytes: synthetic_pe(&[(*b".data\0\0\0", 0x300, &body, 0)]),
+        };
+        let pat = pattern![0x48, 0x8B];
+
+        assert!(find_in_text_with(&reader, reader.base, pat).is_none());
+        assert_eq!(count_in_text_with(&reader, reader.base, pat), 0);
+    }
+
+    #[test]
+    fn reader_text_variants_return_none_or_zero_when_section_read_fails() {
+        let text = [0x48u8, 0x8B, 0x05, 0xFF];
+        let mut bytes = synthetic_pe(&[(*b".text\0\0\0", 0x300, &text, IMAGE_SCN_MEM_EXECUTE)]);
+        bytes.truncate(0x302);
+        let reader = SliceReader {
+            base: 0x6000_0000,
+            bytes,
+        };
+        let pat = pattern![0x48, 0x8B, 0x05];
+
+        assert!(find_in_text_with(&reader, reader.base, pat).is_none());
+        assert_eq!(count_in_text_with(&reader, reader.base, pat), 0);
+    }
+
+    #[test]
+    fn reader_exec_sections_skip_unreadable_sections_for_find_and_count() {
+        let unreadable = [0xAAu8, 0xBB, 0xCC, 0xDD];
+        let readable = [0x90u8, 0x90, 0xC3];
+        let mut bytes = synthetic_pe(&[
+            (*b".text\0\0\0", 0x380, &unreadable, IMAGE_SCN_MEM_EXECUTE),
+            (*b".text$mn", 0x300, &readable, IMAGE_SCN_MEM_EXECUTE),
+        ]);
+        bytes.truncate(0x303);
+        let reader = SliceReader {
+            base: 0x6100_0000,
+            bytes,
+        };
+        let pat = pattern![0x90, 0x90, 0xC3];
+
+        assert_eq!(
+            find_in_exec_sections_with(&reader, reader.base, pat),
+            Some(reader.base + 0x300),
+        );
+        assert_eq!(count_in_exec_sections_with(&reader, reader.base, pat), 1);
+    }
+
+    #[test]
+    fn reader_slice_reader_rejects_underflow_overflow_and_oob_reads() {
+        let reader = SliceReader {
+            base: 0x10,
+            bytes: vec![0u8; 4],
+        };
+        let mut buf = [0u8; 2];
+
+        assert!(reader.read_bytes(reader.base - 1, &mut buf).is_none());
+        assert!(reader.read_bytes(reader.base + 3, &mut buf).is_none());
+
+        let overflow_reader = SliceReader {
+            base: 0,
+            bytes: vec![0u8; 4],
+        };
+        assert!(overflow_reader.read_bytes(usize::MAX, &mut buf).is_none());
+    }
+
     #[cfg(feature = "section-info")]
     #[test]
     fn reader_section_info_scans_named_section() {
@@ -882,6 +970,25 @@ mod tests {
         assert_eq!(
             count_in_section_with(&reader, reader.base, b".text$mn", pat),
             1
+        );
+    }
+
+    #[cfg(feature = "section-info")]
+    #[test]
+    fn reader_section_info_returns_none_or_zero_when_section_read_fails() {
+        let body = [0x90u8, 0x90, 0xC3];
+        let mut bytes = synthetic_pe(&[(*b".rdata\0\0", 0x300, &body, 0)]);
+        bytes.truncate(0x302);
+        let reader = SliceReader {
+            base: 0x6200_0000,
+            bytes,
+        };
+        let pat = pattern![0x90, 0x90, 0xC3];
+
+        assert!(find_in_section_with(&reader, reader.base, b".rdata", pat).is_none());
+        assert_eq!(
+            count_in_section_with(&reader, reader.base, b".rdata", pat),
+            0
         );
     }
 

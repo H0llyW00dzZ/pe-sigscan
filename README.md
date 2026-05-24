@@ -87,7 +87,7 @@ Replace `0.1` with the latest published version on crates.io.
 
 ### Scanning the loaded process
 
-```rust,no_run
+```rust
 use pe_sigscan::{find_in_text, Pattern};
 
 // Get a module base via your preferred means (GetModuleHandleW, PEB walk, etc.).
@@ -109,7 +109,7 @@ helpers. They copy the target section bytes once into a local scratch buffer,
 reuse the same slice scanner as `find_in_slice`, and return the remote
 absolute match address.
 
-```rust,no_run
+```rust
 use pe_sigscan::{find_in_text_with, pattern, MemoryReader};
 
 struct Remote;
@@ -156,7 +156,7 @@ When a single pattern intentionally matches multiple call sites (e.g.
 patching every `call HeapAlloc`, or logging every reference to a
 particular global), use the iterator variants:
 
-```rust,no_run
+```rust
 use pe_sigscan::{iter_in_text, pattern};
 # let module_base: usize = 0;
 
@@ -178,7 +178,7 @@ After matching an instruction whose target is a 32-bit RIP-relative
 displacement, the next step is almost always "follow the displacement to
 its absolute target". `resolve_rel32_at` packages that calculation:
 
-```rust,no_run
+```rust
 use pe_sigscan::{find_in_text, pattern, resolve_rel32_at};
 # let module_base: usize = 0;
 
@@ -203,7 +203,7 @@ safe slice equivalent that returns the raw `i32` displacement.
 
 ### Verifying uniqueness before installing a hook
 
-```rust,no_run
+```rust
 use pe_sigscan::{count_in_text, find_in_text, pattern};
 # let module_base: usize = 0;
 
@@ -230,7 +230,7 @@ Some compilers and linkers split code into multiple sections (`.text$mn`,
 when the function you're scanning for might not live in the section
 literally named `.text`:
 
-```rust,no_run
+```rust
 use pe_sigscan::{find_in_exec_sections, pattern};
 # let module_base: usize = 0;
 
@@ -249,7 +249,7 @@ globals in `.data`, exception unwind data in `.pdata`:
 pe-sigscan = { version = "0.3", features = ["section-info"] }
 ```
 
-```rust,no_run
+```rust
 use pe_sigscan::{find_in_section, iter_in_section, pattern};
 # let module_base: usize = 0;
 
@@ -277,7 +277,7 @@ prefix, so `b".rdata"` also catches suffix-tagged variants like
 feature) reads `SizeOfImage` from the optional header. Useful for
 filtering rel32 resolutions that land outside the current module:
 
-```rust,no_run
+```rust
 use pe_sigscan::{module_size, resolve_rel32_at};
 # let module_base: usize = 0;
 # let match_addr: usize = 0;

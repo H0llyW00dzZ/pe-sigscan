@@ -41,6 +41,9 @@ const DOS_MAGIC_MZ: u16 = 0x5A4D;
 /// `IMAGE_NT_HEADERS.Signature` — `PE\0\0` little-endian.
 const NT_SIGNATURE_PE: u32 = 0x0000_4550;
 
+/// Raw 8-byte `.text` section name (`IMAGE_SECTION_HEADER.Name`).
+const SECTION_NAME_TEXT: &[u8; 8] = b".text\0\0\0";
+
 /// `IMAGE_DOS_HEADER.e_lfanew` byte offset — file offset of NT headers.
 const DOS_E_LFANEW_OFFSET: usize = 0x3C;
 
@@ -81,11 +84,18 @@ struct PeHeaders {
     num_sections: usize,
 }
 
-/// Validate the DOS + NT magics at `module_base` and return a parsed
-/// header handle pointing at the section table.
-///
-/// Returns `None` if `module_base` is zero, the MZ signature is
-/// missing, or the NT `PE\0\0` signature is missing.
+// SAFETY: Guess it, I'm tired of writing "the caller must ensure..." on every unsafe function.
+#[inline]
+unsafe fn read_u16_unaligned(addr: usize) -> u16 {
+    core::ptr::read_unaligned(addr as *const u16)
+}
+
+// SAFETY: Guess it, I'm tired of writing "the caller must ensure..." on every unsafe function.
+#[inline]
+unsafe fn read_u32_unaligned(addr: usize) -> u32 {
+    core::ptr::read_unaligned(addr as *const u32)
+}
+
 #[inline]
 fn parse_pe_headers(module_base: usize) -> Option<PeHeaders> {
     if module_base == 0 {
@@ -95,18 +105,18 @@ fn parse_pe_headers(module_base: usize) -> Option<PeHeaders> {
     // If `module_base` doesn't point at a real PE, one of those
     // checks fails and we return None before any further deref.
     unsafe {
-        if *(module_base as *const u16) != DOS_MAGIC_MZ {
+        if read_u16_unaligned(module_base) != DOS_MAGIC_MZ {
             return None;
         }
-        let nt_offset = *((module_base + DOS_E_LFANEW_OFFSET) as *const u32) as usize;
-        let nt = module_base + nt_offset;
-        if *(nt as *const u32) != NT_SIGNATURE_PE {
+        let nt_offset = read_u32_unaligned(module_base + DOS_E_LFANEW_OFFSET) as usize;
+        let nt = module_base.checked_add(nt_offset)?;
+        if read_u32_unaligned(nt) != NT_SIGNATURE_PE {
             return None;
         }
-        let file_hdr = nt + 4;
-        let num_sections = *((file_hdr + 2) as *const u16) as usize;
-        let opt_hdr_size = *((file_hdr + 16) as *const u16) as usize;
-        let section_table = file_hdr + FILE_HEADER_SIZE + opt_hdr_size;
+        let file_hdr = nt.checked_add(4)?;
+        let num_sections = read_u16_unaligned(file_hdr + 2) as usize;
+        let opt_hdr_size = read_u16_unaligned(file_hdr + 16) as usize;
+        let section_table = file_hdr.checked_add(FILE_HEADER_SIZE + opt_hdr_size)?;
         Some(PeHeaders {
             module_base,
             nt,
@@ -139,14 +149,14 @@ fn parse_pe_headers_with<R: MemoryReader>(reader: &R, module_base: usize) -> Opt
         return None;
     }
     let nt_offset = read_u32_with(reader, module_base + DOS_E_LFANEW_OFFSET)? as usize;
-    let nt = module_base + nt_offset;
+    let nt = module_base.checked_add(nt_offset)?;
     if read_u32_with(reader, nt)? != NT_SIGNATURE_PE {
         return None;
     }
-    let file_hdr = nt + 4;
+    let file_hdr = nt.checked_add(4)?;
     let num_sections = read_u16_with(reader, file_hdr + 2)? as usize;
     let opt_hdr_size = read_u16_with(reader, file_hdr + 16)? as usize;
-    let section_table = file_hdr + FILE_HEADER_SIZE + opt_hdr_size;
+    let section_table = file_hdr.checked_add(FILE_HEADER_SIZE + opt_hdr_size)?;
     Some(PeHeaders {
         module_base,
         nt,
@@ -199,9 +209,9 @@ unsafe fn read_section_at(sec: usize, module_base: usize) -> SectionInfo {
     //   +8:  VirtualSize (u32)
     //   +12: VirtualAddress (u32)
     //   +36: Characteristics (u32)
-    let virtual_size = *((sec + 8) as *const u32) as usize;
-    let virtual_address = *((sec + 12) as *const u32) as usize;
-    let characteristics = *((sec + 36) as *const u32);
+    let virtual_size = read_u32_unaligned(sec + 8) as usize;
+    let virtual_address = read_u32_unaligned(sec + 12) as usize;
+    let characteristics = read_u32_unaligned(sec + 36);
     SectionInfo {
         name,
         virtual_address: module_base + virtual_address,
@@ -316,7 +326,7 @@ pub(crate) fn exec_sections_with<R: MemoryReader>(
 /// virtual_size)` tuple, or `None` if the headers are malformed or
 /// `.text` is missing.
 pub(crate) fn text_section_bounds(module_base: usize) -> Option<(usize, usize)> {
-    let s = find_section(module_base, b".text")?;
+    let s = find_section(module_base, SECTION_NAME_TEXT)?;
     Some((s.virtual_address, s.virtual_size))
 }
 
@@ -324,7 +334,7 @@ pub(crate) fn text_section_bounds_with<R: MemoryReader>(
     reader: &R,
     module_base: usize,
 ) -> Option<(usize, usize)> {
-    let section = find_section_with(reader, module_base, b".text")?;
+    let section = find_section_with(reader, module_base, SECTION_NAME_TEXT)?;
     Some((section.virtual_address, section.virtual_size))
 }
 
@@ -369,9 +379,10 @@ pub fn module_size(module_base: usize) -> Option<usize> {
     // SizeOfImage is at OptionalHeader+56, same offset in PE32 and
     // PE32+ — well inside the loader-mapped header region.
     unsafe {
-        let size_of_image_addr =
-            hdr.nt + OPTIONAL_HEADER_OFFSET + OPTIONAL_HEADER_SIZE_OF_IMAGE_OFFSET;
-        Some(*(size_of_image_addr as *const u32) as usize)
+        let size_of_image_addr = hdr
+            .nt
+            .checked_add(OPTIONAL_HEADER_OFFSET + OPTIONAL_HEADER_SIZE_OF_IMAGE_OFFSET)?;
+        Some(read_u32_unaligned(size_of_image_addr) as usize)
     }
 }
 
@@ -381,7 +392,9 @@ pub fn module_size(module_base: usize) -> Option<usize> {
 #[must_use]
 pub fn module_size_with<R: MemoryReader>(reader: &R, module_base: usize) -> Option<usize> {
     let hdr = parse_pe_headers_with(reader, module_base)?;
-    let size_of_image_addr = hdr.nt + OPTIONAL_HEADER_OFFSET + OPTIONAL_HEADER_SIZE_OF_IMAGE_OFFSET;
+    let size_of_image_addr = hdr
+        .nt
+        .checked_add(OPTIONAL_HEADER_OFFSET + OPTIONAL_HEADER_SIZE_OF_IMAGE_OFFSET)?;
     Some(read_u32_with(reader, size_of_image_addr)? as usize)
 }
 
@@ -505,6 +518,19 @@ mod tests {
         assert_eq!(hdr.module_base, buf.as_ptr() as usize);
         // Section table is at NT+4+20+opt_size = 0x80+24+0xF0 = 0x188.
         assert_eq!(hdr.section_table, buf.as_ptr() as usize + 0x80 + 24 + 0xF0);
+    }
+
+    #[test]
+    fn parse_pe_headers_accepts_unaligned_module_base() {
+        let body = [0x90u8];
+        let image = synthetic_pe(&[(*b".text\0\0\0", 0x300, &body, IMAGE_SCN_MEM_EXECUTE)]);
+        let mut backing = vec![0u8; image.len() + 1];
+        backing[1..].copy_from_slice(&image);
+
+        let base = backing.as_ptr() as usize + 1;
+        let hdr = parse_pe_headers(base).unwrap();
+        assert_eq!(hdr.module_base, base);
+        assert_eq!(hdr.section_table, base + 0x80 + 24 + 0xF0);
     }
 
     #[test]
@@ -686,6 +712,19 @@ mod tests {
         assert!(text_section_bounds(buf.as_ptr() as usize).is_none());
     }
 
+    #[test]
+    fn text_section_bounds_prefers_exact_text_over_prefixed_text_sections() {
+        let prefixed_body = [0x11u8, 0x22];
+        let text_body = [0xAAu8, 0xBB, 0xCC];
+        let buf = synthetic_pe(&[
+            (*b".text$mn", 0x300, &prefixed_body, IMAGE_SCN_MEM_EXECUTE),
+            (*SECTION_NAME_TEXT, 0x400, &text_body, IMAGE_SCN_MEM_EXECUTE),
+        ]);
+        let base = buf.as_ptr() as usize;
+
+        assert_eq!(text_section_bounds(base), Some((base + 0x400, text_body.len())));
+    }
+
     // -- exec_sections (legacy wrapper over iter_sections) ----------------
 
     #[test]
@@ -789,6 +828,24 @@ mod tests {
     }
 
     #[test]
+    fn text_section_bounds_with_prefers_exact_text_over_prefixed_text_sections() {
+        let prefixed_body = [0x11u8, 0x22];
+        let text_body = [0xAAu8, 0xBB, 0xCC];
+        let reader = SliceReader {
+            base: 0x5000_0000,
+            bytes: synthetic_pe(&[
+                (*b".text$mn", 0x300, &prefixed_body, IMAGE_SCN_MEM_EXECUTE),
+                (*SECTION_NAME_TEXT, 0x400, &text_body, IMAGE_SCN_MEM_EXECUTE),
+            ]),
+        };
+
+        assert_eq!(
+            text_section_bounds_with(&reader, reader.base),
+            Some((reader.base + 0x400, text_body.len())),
+        );
+    }
+
+    #[test]
     fn slice_reader_rejects_underflow_overflow_and_oob_reads() {
         let reader = SliceReader {
             base: 0x10,
@@ -859,6 +916,17 @@ mod tests {
             buf[soi_offset..soi_offset + 4].copy_from_slice(&sentinel.to_le_bytes());
             let base = buf.as_ptr() as usize;
             assert_eq!(module_size(base), Some(0xDEAD_BEEF));
+        }
+
+        #[test]
+        fn reads_size_of_image_from_unaligned_module_base() {
+            let body = [0x90u8];
+            let image = synthetic_pe(&[(*b".text\0\0\0", 0x300, &body, IMAGE_SCN_MEM_EXECUTE)]);
+            let mut backing = vec![0u8; image.len() + 1];
+            backing[1..].copy_from_slice(&image);
+
+            let base = backing.as_ptr() as usize + 1;
+            assert_eq!(module_size(base), Some(image.len()));
         }
 
         /// Exercise the re-exported public path

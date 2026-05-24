@@ -15,6 +15,8 @@
 
 use alloc::vec::Vec;
 
+use crate::MemoryReader;
+
 // ---------------------------------------------------------------------------
 // PE-format constants
 // ---------------------------------------------------------------------------
@@ -114,6 +116,45 @@ fn parse_pe_headers(module_base: usize) -> Option<PeHeaders> {
     }
 }
 
+#[inline]
+fn read_u16_with<R: MemoryReader>(reader: &R, addr: usize) -> Option<u16> {
+    let mut buf = [0u8; 2];
+    reader.read_bytes(addr, &mut buf)?;
+    Some(u16::from_le_bytes(buf))
+}
+
+#[inline]
+fn read_u32_with<R: MemoryReader>(reader: &R, addr: usize) -> Option<u32> {
+    let mut buf = [0u8; 4];
+    reader.read_bytes(addr, &mut buf)?;
+    Some(u32::from_le_bytes(buf))
+}
+
+#[inline]
+fn parse_pe_headers_with<R: MemoryReader>(reader: &R, module_base: usize) -> Option<PeHeaders> {
+    if module_base == 0 {
+        return None;
+    }
+    if read_u16_with(reader, module_base)? != DOS_MAGIC_MZ {
+        return None;
+    }
+    let nt_offset = read_u32_with(reader, module_base + DOS_E_LFANEW_OFFSET)? as usize;
+    let nt = module_base + nt_offset;
+    if read_u32_with(reader, nt)? != NT_SIGNATURE_PE {
+        return None;
+    }
+    let file_hdr = nt + 4;
+    let num_sections = read_u16_with(reader, file_hdr + 2)? as usize;
+    let opt_hdr_size = read_u16_with(reader, file_hdr + 16)? as usize;
+    let section_table = file_hdr + FILE_HEADER_SIZE + opt_hdr_size;
+    Some(PeHeaders {
+        module_base,
+        nt,
+        section_table,
+        num_sections,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // SectionInfo + section enumeration
 // ---------------------------------------------------------------------------
@@ -169,6 +210,31 @@ unsafe fn read_section_at(sec: usize, module_base: usize) -> SectionInfo {
     }
 }
 
+#[inline]
+fn read_section_at_with<R: MemoryReader>(
+    reader: &R,
+    sec: usize,
+    module_base: usize,
+) -> Option<SectionInfo> {
+    let mut header = [0u8; SECTION_HEADER_SIZE];
+    reader.read_bytes(sec, &mut header)?;
+
+    let mut name = [0u8; 8];
+    name.copy_from_slice(&header[..8]);
+
+    let virtual_size = u32::from_le_bytes([header[8], header[9], header[10], header[11]]) as usize;
+    let virtual_address =
+        u32::from_le_bytes([header[12], header[13], header[14], header[15]]) as usize;
+    let characteristics = u32::from_le_bytes([header[36], header[37], header[38], header[39]]);
+
+    Some(SectionInfo {
+        name,
+        virtual_address: module_base + virtual_address,
+        virtual_size,
+        characteristics,
+    })
+}
+
 /// Iterate every section in declaration order. Returns `None` if the
 /// headers are malformed.
 ///
@@ -185,6 +251,19 @@ pub(crate) fn iter_sections(module_base: usize) -> Option<impl Iterator<Item = S
     }))
 }
 
+pub(crate) fn iter_sections_with<R: MemoryReader>(
+    reader: &R,
+    module_base: usize,
+) -> Option<Vec<SectionInfo>> {
+    let hdr = parse_pe_headers_with(reader, module_base)?;
+    let mut sections = Vec::with_capacity(hdr.num_sections);
+    for i in 0..hdr.num_sections {
+        let sec = hdr.section_table + i * SECTION_HEADER_SIZE;
+        sections.push(read_section_at_with(reader, sec, hdr.module_base)?);
+    }
+    Some(sections)
+}
+
 /// Find the first section whose 8-byte name starts with `prefix`.
 ///
 /// Prefix is matched against the raw 8 bytes — `b".text"` matches
@@ -193,6 +272,16 @@ pub(crate) fn iter_sections(module_base: usize) -> Option<impl Iterator<Item = S
 #[must_use]
 pub(crate) fn find_section(module_base: usize, prefix: &[u8]) -> Option<SectionInfo> {
     iter_sections(module_base)?.find(|s| s.name.starts_with(prefix))
+}
+
+pub(crate) fn find_section_with<R: MemoryReader>(
+    reader: &R,
+    module_base: usize,
+    prefix: &[u8],
+) -> Option<SectionInfo> {
+    iter_sections_with(reader, module_base)?
+        .into_iter()
+        .find(|section| section.name.starts_with(prefix))
 }
 
 /// Walk the PE section table at `module_base` and return every
@@ -210,12 +299,33 @@ pub(crate) fn exec_sections(module_base: usize) -> Option<Vec<(usize, usize)>> {
     )
 }
 
+pub(crate) fn exec_sections_with<R: MemoryReader>(
+    reader: &R,
+    module_base: usize,
+) -> Option<Vec<(usize, usize)>> {
+    Some(
+        iter_sections_with(reader, module_base)?
+            .into_iter()
+            .filter(SectionInfo::is_executable)
+            .map(|section| (section.virtual_address, section.virtual_size))
+            .collect(),
+    )
+}
+
 /// Return the `.text` section's `(virtual_address_absolute,
 /// virtual_size)` tuple, or `None` if the headers are malformed or
 /// `.text` is missing.
 pub(crate) fn text_section_bounds(module_base: usize) -> Option<(usize, usize)> {
     let s = find_section(module_base, b".text")?;
     Some((s.virtual_address, s.virtual_size))
+}
+
+pub(crate) fn text_section_bounds_with<R: MemoryReader>(
+    reader: &R,
+    module_base: usize,
+) -> Option<(usize, usize)> {
+    let section = find_section_with(reader, module_base, b".text")?;
+    Some((section.virtual_address, section.virtual_size))
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +375,16 @@ pub fn module_size(module_base: usize) -> Option<usize> {
     }
 }
 
+/// Read `IMAGE_OPTIONAL_HEADER.SizeOfImage` through a [`MemoryReader`].
+///
+/// This is the out-of-process companion to [`module_size`].
+#[must_use]
+pub fn module_size_with<R: MemoryReader>(reader: &R, module_base: usize) -> Option<usize> {
+    let hdr = parse_pe_headers_with(reader, module_base)?;
+    let size_of_image_addr = hdr.nt + OPTIONAL_HEADER_OFFSET + OPTIONAL_HEADER_SIZE_OF_IMAGE_OFFSET;
+    Some(read_u32_with(reader, size_of_image_addr)? as usize)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -272,8 +392,26 @@ pub fn module_size(module_base: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MemoryReader;
     use alloc::vec;
     use alloc::vec::Vec;
+
+    struct SliceReader {
+        base: usize,
+        bytes: Vec<u8>,
+    }
+
+    impl MemoryReader for SliceReader {
+        fn read_bytes(&self, addr: usize, buf: &mut [u8]) -> Option<()> {
+            let start = addr.checked_sub(self.base)?;
+            let end = start.checked_add(buf.len())?;
+            if end > self.bytes.len() {
+                return None;
+            }
+            buf.copy_from_slice(&self.bytes[start..end]);
+            Some(())
+        }
+    }
 
     /// Build a minimal PE-shaped byte buffer with a configurable
     /// section list. Each entry is `(name_8b, virtual_address,
@@ -367,6 +505,60 @@ mod tests {
         assert_eq!(hdr.module_base, buf.as_ptr() as usize);
         // Section table is at NT+4+20+opt_size = 0x80+24+0xF0 = 0x188.
         assert_eq!(hdr.section_table, buf.as_ptr() as usize + 0x80 + 24 + 0xF0);
+    }
+
+    #[test]
+    fn parse_pe_headers_with_returns_none_for_zero_base() {
+        let reader = SliceReader {
+            base: 0x5000_0000,
+            bytes: vec![0u8; 0x400],
+        };
+        assert!(parse_pe_headers_with(&reader, 0).is_none());
+    }
+
+    #[test]
+    fn parse_pe_headers_with_returns_none_for_missing_mz() {
+        let reader = SliceReader {
+            base: 0x5000_0000,
+            bytes: vec![0u8; 0x400],
+        };
+        assert!(parse_pe_headers_with(&reader, reader.base).is_none());
+    }
+
+    #[test]
+    fn parse_pe_headers_with_returns_none_for_short_dos_header() {
+        let reader = SliceReader {
+            base: 0x5000_0000,
+            bytes: vec![b'M', b'Z'],
+        };
+        assert!(parse_pe_headers_with(&reader, reader.base).is_none());
+    }
+
+    #[test]
+    fn parse_pe_headers_with_returns_none_for_missing_pe_sig() {
+        let mut bytes = vec![0u8; 0x400];
+        bytes[0] = b'M';
+        bytes[1] = b'Z';
+        let nt_offset: u32 = 0x80;
+        bytes[0x3C..0x40].copy_from_slice(&nt_offset.to_le_bytes());
+        let reader = SliceReader {
+            base: 0x5000_0000,
+            bytes,
+        };
+        assert!(parse_pe_headers_with(&reader, reader.base).is_none());
+    }
+
+    #[test]
+    fn parse_pe_headers_with_walks_to_section_table() {
+        let body = [0x90u8];
+        let reader = SliceReader {
+            base: 0x5000_0000,
+            bytes: synthetic_pe(&[(*b".text\0\0\0", 0x300, &body, IMAGE_SCN_MEM_EXECUTE)]),
+        };
+        let hdr = parse_pe_headers_with(&reader, reader.base).unwrap();
+        assert_eq!(hdr.num_sections, 1);
+        assert_eq!(hdr.module_base, reader.base);
+        assert_eq!(hdr.section_table, reader.base + 0x80 + 24 + 0xF0);
     }
 
     // -- iter_sections / find_section -------------------------------------
@@ -549,12 +741,77 @@ mod tests {
         assert!(secs.is_empty());
     }
 
+    #[test]
+    fn iter_sections_with_and_helpers_work_for_remote_reader() {
+        let exec_body = [0x90u8, 0xC3];
+        let data_body = [0xAAu8, 0xBB];
+        let reader = SliceReader {
+            base: 0x5000_0000,
+            bytes: synthetic_pe(&[
+                (*b".text\0\0\0", 0x300, &exec_body, IMAGE_SCN_MEM_EXECUTE),
+                (*b".data\0\0\0", 0x310, &data_body, IMAGE_SCN_MEM_READ),
+            ]),
+        };
+
+        let sections = iter_sections_with(&reader, reader.base).unwrap();
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].virtual_address, reader.base + 0x300);
+        assert_eq!(
+            find_section_with(&reader, reader.base, b".text")
+                .unwrap()
+                .virtual_address,
+            reader.base + 0x300,
+        );
+        assert_eq!(
+            text_section_bounds_with(&reader, reader.base),
+            Some((reader.base + 0x300, exec_body.len())),
+        );
+        assert_eq!(
+            exec_sections_with(&reader, reader.base),
+            Some(vec![(reader.base + 0x300, exec_body.len())]),
+        );
+    }
+
+    #[test]
+    fn iter_sections_with_returns_none_when_section_header_read_fails() {
+        let body = [0x90u8];
+        let mut bytes = synthetic_pe(&[(*b".text\0\0\0", 0x300, &body, IMAGE_SCN_MEM_EXECUTE)]);
+        bytes.truncate(0x188 + 39);
+        let reader = SliceReader {
+            base: 0x5000_0000,
+            bytes,
+        };
+
+        assert!(iter_sections_with(&reader, reader.base).is_none());
+        assert!(find_section_with(&reader, reader.base, b".text").is_none());
+        assert!(text_section_bounds_with(&reader, reader.base).is_none());
+        assert!(exec_sections_with(&reader, reader.base).is_none());
+    }
+
+    #[test]
+    fn slice_reader_rejects_underflow_overflow_and_oob_reads() {
+        let reader = SliceReader {
+            base: 0x10,
+            bytes: vec![0u8; 4],
+        };
+        let mut buf = [0u8; 2];
+
+        assert!(reader.read_bytes(reader.base - 1, &mut buf).is_none());
+        assert!(reader.read_bytes(reader.base + 3, &mut buf).is_none());
+
+        let overflow_reader = SliceReader {
+            base: 0,
+            bytes: vec![0u8; 4],
+        };
+        assert!(overflow_reader.read_bytes(usize::MAX, &mut buf).is_none());
+    }
+
     // -- module_size (feature `section-info`) ----------------------------
 
     #[cfg(feature = "section-info")]
     mod module_size_tests {
         use super::synthetic_pe;
-        use crate::pe::{module_size, IMAGE_SCN_MEM_EXECUTE};
+        use crate::pe::{module_size, module_size_with, IMAGE_SCN_MEM_EXECUTE};
         use alloc::vec;
 
         #[test]
@@ -614,6 +871,32 @@ mod tests {
             let buf = synthetic_pe(&[(*b".text\0\0\0", 0x300, &body, IMAGE_SCN_MEM_EXECUTE)]);
             let base = buf.as_ptr() as usize;
             assert_eq!(crate::module_size(base), Some(buf.len()));
+        }
+
+        #[test]
+        fn module_size_with_reads_remote_size_of_image() {
+            let body = [0x90u8];
+            let bytes = synthetic_pe(&[(*b".text\0\0\0", 0x300, &body, IMAGE_SCN_MEM_EXECUTE)]);
+            let expected = bytes.len();
+            let reader = super::SliceReader {
+                base: 0x5000_0000,
+                bytes,
+            };
+            assert_eq!(module_size_with(&reader, reader.base), Some(expected));
+        }
+
+        #[test]
+        fn module_size_with_returns_none_when_size_of_image_read_is_truncated() {
+            let body = [0x90u8];
+            let mut bytes = synthetic_pe(&[(*b".text\0\0\0", 0x300, &body, IMAGE_SCN_MEM_EXECUTE)]);
+            let size_of_image_offset = 0x80 + 24 + 56;
+            bytes.truncate(size_of_image_offset + 3);
+            let reader = super::SliceReader {
+                base: 0x5000_0000,
+                bytes,
+            };
+
+            assert!(module_size_with(&reader, reader.base).is_none());
         }
     }
 }

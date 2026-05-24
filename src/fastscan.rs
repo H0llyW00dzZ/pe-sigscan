@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn first_byte_in_raw_returns_none_when_absent() {
-        let buf = vec![0u8; 64];
+        let buf = [0u8; 64];
         let result = unsafe { first_byte_in_raw(buf.as_ptr() as usize, buf.len(), 0xFF) };
         assert_eq!(result, None);
     }

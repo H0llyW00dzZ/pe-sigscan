@@ -10,12 +10,13 @@
   <img src="assets/image/logo.jpg" alt="pe-sigscan logo" width="280">
 </p>
 
-Fast in-process byte-pattern ("signature") scanning over the executable
-sections of a loaded PE module on Windows.
+Fast byte-pattern ("signature") scanning over the executable sections of a
+loaded PE module on Windows, with both in-process and reader-backed
+out-of-process scanning APIs.
 
-A small, dependency-free building block for game mods, hookers, debuggers, and
-any other in-process tool that needs to locate non-exported, non-vtable-
-accessible code by its byte signature.
+A small, dependency-free building block for game mods, hookers, debuggers,
+remote memory tools, and any other workflow that needs to locate
+non-exported, non-vtable-accessible code by its byte signature.
 
 ## Features
 
@@ -48,9 +49,14 @@ accessible code by its byte signature.
   `jmp rel32`).
 - **Slice variants** (`find_in_slice`, `count_in_slice`, `iter_in_slice`)
   for offline analysis and unit testing without a loaded PE.
-- **Direct memory reads** (no `ReadProcessMemory` round-trip per byte) —
-  suitable for scanning tens of megabytes of `.text` in well under a
-  second.
+- **Reader-backed scanning** for out-of-process backends. Implement
+  `MemoryReader` and use `find_in_text_with`, `count_in_text_with`,
+  `find_in_exec_sections_with`, `count_in_exec_sections_with`, and
+  `module_size_with` for `ReadProcessMemory`, kernel, DMA, or hypervisor
+  workflows.
+- **Direct memory reads** on the in-process path (no `ReadProcessMemory`
+  round-trip per byte) — suitable for scanning tens of megabytes of `.text`
+  in well under a second.
 - **Vectorized first-byte search**. The hot anchor pre-filter ships in two
   flavours: a portable SWAR (8-byte word) implementation that is the
   default, and an optional `memchr`-backed path that uses runtime-detected
@@ -77,9 +83,11 @@ Or, for SIMD-accelerated scans (recommended for cheats / mod loaders):
 pe-sigscan = { version = "0.1", features = ["memchr"] }
 ```
 
+Replace `0.1` with the latest published version on crates.io.
+
 ### Scanning the loaded process
 
-```rust,no_run
+```rust
 use pe_sigscan::{find_in_text, Pattern};
 
 // Get a module base via your preferred means (GetModuleHandleW, PEB walk, etc.).
@@ -92,6 +100,46 @@ if let Some(addr) = find_in_text(module_base, pat.as_slice()) {
     println!("matched at {addr:#x}");
 }
 ```
+
+### Scanning through a custom reader
+
+For out-of-process backends such as `ReadProcessMemory`, kernel drivers, DMA,
+or hypervisor introspection, implement `MemoryReader` and use the `*_with`
+helpers. They copy the target section bytes once into a local scratch buffer,
+reuse the same slice scanner as `find_in_slice`, and return the remote
+absolute match address.
+
+```rust
+use pe_sigscan::{find_in_text_with, pattern, MemoryReader};
+
+struct Remote;
+
+impl MemoryReader for Remote {
+    fn read_bytes(&self, addr: usize, buf: &mut [u8]) -> Option<()> {
+        let _ = (addr, buf);
+        // Fill `buf` from your backend here.
+        None
+    }
+}
+
+let reader = Remote;
+let module_base: usize = /* remote module base */ 0;
+
+const SIG: &[Option<u8>] = pattern![0x48, 0x8B, 0x05, _, _, _, _];
+let _ = find_in_text_with(&reader, module_base, SIG);
+```
+
+Use the matching companions when needed:
+
+- `count_in_text_with`
+- `find_in_exec_sections_with`
+- `count_in_exec_sections_with`
+- `module_size_with`
+
+With the `section-info` feature:
+
+- `find_in_section_with`
+- `count_in_section_with`
 
 ### Compile-time patterns
 
@@ -108,7 +156,7 @@ When a single pattern intentionally matches multiple call sites (e.g.
 patching every `call HeapAlloc`, or logging every reference to a
 particular global), use the iterator variants:
 
-```rust,no_run
+```rust
 use pe_sigscan::{iter_in_text, pattern};
 # let module_base: usize = 0;
 
@@ -130,7 +178,7 @@ After matching an instruction whose target is a 32-bit RIP-relative
 displacement, the next step is almost always "follow the displacement to
 its absolute target". `resolve_rel32_at` packages that calculation:
 
-```rust,no_run
+```rust
 use pe_sigscan::{find_in_text, pattern, resolve_rel32_at};
 # let module_base: usize = 0;
 
@@ -155,7 +203,7 @@ safe slice equivalent that returns the raw `i32` displacement.
 
 ### Verifying uniqueness before installing a hook
 
-```rust,no_run
+```rust
 use pe_sigscan::{count_in_text, find_in_text, pattern};
 # let module_base: usize = 0;
 
@@ -182,7 +230,7 @@ Some compilers and linkers split code into multiple sections (`.text$mn`,
 when the function you're scanning for might not live in the section
 literally named `.text`:
 
-```rust,no_run
+```rust
 use pe_sigscan::{find_in_exec_sections, pattern};
 # let module_base: usize = 0;
 
@@ -192,16 +240,16 @@ let addr = find_in_exec_sections(module_base, SIG);
 
 ### Scanning a specific section (optional)
 
-Enable the `section-info` feature when the bytes you're after live
-outside any executable section — string literals and vtables in
-`.rdata`, runtime globals in `.data`, exception unwind data in `.pdata`:
+Enable the `section-info` feature when the bytes you're after live outside
+any executable section — string literals and vtables in `.rdata`, runtime
+globals in `.data`, exception unwind data in `.pdata`:
 
 ```toml
 [dependencies]
 pe-sigscan = { version = "0.3", features = ["section-info"] }
 ```
 
-```rust,no_run
+```rust
 use pe_sigscan::{find_in_section, iter_in_section, pattern};
 # let module_base: usize = 0;
 
@@ -229,7 +277,7 @@ prefix, so `b".rdata"` also catches suffix-tagged variants like
 feature) reads `SizeOfImage` from the optional header. Useful for
 filtering rel32 resolutions that land outside the current module:
 
-```rust,no_run
+```rust
 use pe_sigscan::{module_size, resolve_rel32_at};
 # let module_base: usize = 0;
 # let match_addr: usize = 0;
@@ -243,6 +291,8 @@ if let Some(size) = module_size(module_base) {
     }
 }
 ```
+
+For out-of-process readers, use `module_size_with(&reader, module_base)`.
 
 ### Offline analysis (no loaded PE required)
 

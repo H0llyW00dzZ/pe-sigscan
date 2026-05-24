@@ -1,14 +1,14 @@
 //! # pe-sigscan
 //!
-//! Fast in-process byte-pattern ("signature") scanning over the executable
-//! sections of a loaded PE (Portable Executable) module on Windows.
+//! Fast byte-pattern ("signature") scanning over the executable sections of a
+//! loaded PE (Portable Executable) module on Windows.
 //!
 //! This crate is a building block for game mods, hookers, debuggers, and any
-//! other in-process tool that needs to locate non-exported, non-vtable-
-//! accessible code by its byte signature. It mirrors the workflow common
-//! across the reverse-engineering ecosystem — derive a pattern from a
-//! disassembler (IDA, Ghidra, Binary Ninja, Cutter), then scan the live
-//! process's mapped image for it at runtime.
+//! other tool that needs to locate non-exported, non-vtable-accessible code by
+//! its byte signature. It mirrors the workflow common across the
+//! reverse-engineering ecosystem — derive a pattern from a disassembler (IDA,
+//! Ghidra, Binary Ninja, Cutter), then scan either the live process's mapped
+//! image or bytes read through a custom backend.
 //!
 //! ## Quick start
 //!
@@ -55,6 +55,36 @@
 //! companions that work on a `&[u8]` instead of a loaded PE — useful for
 //! offline analysis, unit testing, and scanning extracted bytes.
 //!
+//! ## Reader-backed scanning
+//!
+//! For out-of-process backends such as `ReadProcessMemory`, kernel drivers,
+//! DMA, or hypervisor introspection, use the [`MemoryReader`] trait plus the
+//! `*_with` helpers such as [`find_in_text_with`] and
+//! [`find_in_exec_sections_with`].
+//!
+//! Those APIs read the target section bytes into local memory once, then reuse
+//! the same slice scanner as the in-process path. They return the remote match
+//! address, not the local scratch-buffer address.
+//!
+//! ```no_run
+//! use pe_sigscan::{find_in_text_with, pattern, MemoryReader};
+//!
+//! struct Remote;
+//!
+//! impl MemoryReader for Remote {
+//!     fn read_bytes(&self, addr: usize, buf: &mut [u8]) -> Option<()> {
+//!         # let _ = (addr, buf);
+//!         // Fill `buf` from your remote backend here.
+//!         None
+//!     }
+//! }
+//!
+//! # let reader = Remote;
+//! # let module_base = 0usize;
+//! const SIG: &[Option<u8>] = pattern![0x48, 0x8B, 0x05, _, _, _, _];
+//! let _ = find_in_text_with(&reader, module_base, SIG);
+//! ```
+//!
 //! ## Resolving rel32 displacements
 //!
 //! Real signature workflows almost always end with "match the
@@ -82,8 +112,12 @@
 //! concern; bytes don't change between reads. A typical scan walks tens of
 //! megabytes of bytes — routing every probe through `ReadProcessMemory`
 //! would cost tens of millions of syscalls (minutes of wall time). This
-//! crate reads directly via raw pointer dereference, bounded to PE-declared
-//! section ranges.
+//! crate's in-process path reads directly via raw pointer dereference, bounded
+//! to PE-declared section ranges.
+//!
+//! For out-of-process backends, use the reader-backed `*_with` APIs. Those
+//! copy the target section bytes once into local memory, then reuse the same
+//! slice scanner as [`find_in_slice`].
 //!
 //! ## Safety
 //!
@@ -119,6 +153,18 @@
 
 extern crate alloc;
 
+/// Abstract byte reader for address spaces that cannot be dereferenced
+/// directly from the current process.
+///
+/// This is the intended integration point for out-of-process backends such as
+/// `ReadProcessMemory`, kernel drivers, DMA, and VM introspection.
+pub trait MemoryReader {
+    /// Fill `buf` with bytes starting at `addr`.
+    ///
+    /// Returns `None` when the read fails or the range is not available.
+    fn read_bytes(&self, addr: usize, buf: &mut [u8]) -> Option<()>;
+}
+
 mod error;
 mod fastscan;
 mod instr;
@@ -129,9 +175,12 @@ mod scan;
 pub use crate::error::{ParseErrorKind, ParsePatternError};
 pub use crate::instr::{read_rel32, resolve_rel32, resolve_rel32_at};
 pub use crate::pattern::{Pattern, WildcardPattern};
+pub use crate::pe::module_size_with;
 pub use crate::scan::{
-    count_in_exec_sections, count_in_slice, count_in_text, find_in_exec_sections, find_in_slice,
-    find_in_text, iter_in_exec_sections, iter_in_slice, iter_in_text, Matches, SliceMatches,
+    count_in_exec_sections, count_in_exec_sections_with, count_in_slice, count_in_text,
+    count_in_text_with, find_in_exec_sections, find_in_exec_sections_with, find_in_slice,
+    find_in_text, find_in_text_with, iter_in_exec_sections, iter_in_slice, iter_in_text, Matches,
+    SliceMatches,
 };
 
 // Section-targeted scanners (feature `section-info`).
@@ -146,7 +195,9 @@ pub use crate::scan::{
 // `crate::pe` so that advanced users can implement their own
 // section-specific logic if needed.
 #[cfg(feature = "section-info")]
-pub use crate::scan::{count_in_section, find_in_section, iter_in_section};
+pub use crate::scan::{
+    count_in_section, count_in_section_with, find_in_section, find_in_section_with, iter_in_section,
+};
 
 // `module_size` is a standalone reader for
 // `IMAGE_OPTIONAL_HEADER.SizeOfImage` — useful for cross-module
@@ -291,7 +342,7 @@ mod tests {
             kind: ParseErrorKind::Empty,
         };
         let copied = e;
-        let cloned = e.clone();
+        let cloned = e;
         assert_eq!(copied, e);
         assert_eq!(cloned, e);
     }

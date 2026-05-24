@@ -18,7 +18,8 @@
 
 use crate::fastscan::{first_byte_in_raw, first_byte_in_slice};
 use crate::pattern::WildcardPattern;
-use crate::pe::{exec_sections, text_section_bounds};
+use crate::pe::{exec_sections, exec_sections_with, text_section_bounds, text_section_bounds_with};
+use crate::MemoryReader;
 
 /// Match `pattern` against the bytes starting at `addr`. Wildcards (`None`
 /// entries) match any byte.
@@ -115,6 +116,118 @@ pub fn count_in_exec_sections(module_base: usize, pattern: WildcardPattern<'_>) 
     let mut total = 0usize;
     for (start, size) in sections {
         total += count_range(start, size, pattern);
+    }
+    total
+}
+
+#[inline]
+fn read_section_bytes<R: MemoryReader>(
+    reader: &R,
+    start: usize,
+    size: usize,
+) -> Option<alloc::vec::Vec<u8>> {
+    let mut bytes = alloc::vec![0u8; size];
+    reader.read_bytes(start, &mut bytes)?;
+    Some(bytes)
+}
+
+#[inline]
+fn find_in_remote_range<R: MemoryReader>(
+    reader: &R,
+    start: usize,
+    size: usize,
+    pattern: WildcardPattern<'_>,
+) -> Option<usize> {
+    let bytes = read_section_bytes(reader, start, size)?;
+    find_in_slice(&bytes, pattern).map(|addr| start + (addr - bytes.as_ptr() as usize))
+}
+
+#[inline]
+fn count_in_remote_range<R: MemoryReader>(
+    reader: &R,
+    start: usize,
+    size: usize,
+    pattern: WildcardPattern<'_>,
+) -> usize {
+    let Some(bytes) = read_section_bytes(reader, start, size) else {
+        return 0;
+    };
+    count_in_slice(&bytes, pattern)
+}
+
+/// Find the first occurrence of `pattern` within the named `.text` section
+/// of a PE module read through [`MemoryReader`].
+///
+/// This is the out-of-process companion to [`find_in_text`]. The section bytes
+/// are copied into a local scratch buffer once, then scanned with the same
+/// slice scanner used by [`find_in_slice`]. Returned addresses are still the
+/// remote absolute addresses.
+#[must_use]
+pub fn find_in_text_with<R: MemoryReader>(
+    reader: &R,
+    module_base: usize,
+    pattern: WildcardPattern<'_>,
+) -> Option<usize> {
+    if module_base == 0 || pattern.is_empty() {
+        return None;
+    }
+    let (start, size) = text_section_bounds_with(reader, module_base)?;
+    find_in_remote_range(reader, start, size, pattern)
+}
+
+/// Count occurrences of `pattern` within the named `.text` section of a PE
+/// module read through [`MemoryReader`].
+#[must_use]
+pub fn count_in_text_with<R: MemoryReader>(
+    reader: &R,
+    module_base: usize,
+    pattern: WildcardPattern<'_>,
+) -> usize {
+    if module_base == 0 || pattern.is_empty() {
+        return 0;
+    }
+    let Some((start, size)) = text_section_bounds_with(reader, module_base) else {
+        return 0;
+    };
+    count_in_remote_range(reader, start, size, pattern)
+}
+
+/// Find the first occurrence of `pattern` across all executable sections of a
+/// PE module read through [`MemoryReader`].
+#[must_use]
+pub fn find_in_exec_sections_with<R: MemoryReader>(
+    reader: &R,
+    module_base: usize,
+    pattern: WildcardPattern<'_>,
+) -> Option<usize> {
+    if module_base == 0 || pattern.is_empty() {
+        return None;
+    }
+    for (start, size) in exec_sections_with(reader, module_base)? {
+        if let Some(addr) = find_in_remote_range(reader, start, size, pattern) {
+            return Some(addr);
+        }
+    }
+    None
+}
+
+/// Count occurrences of `pattern` across all executable sections of a PE
+/// module read through [`MemoryReader`].
+#[must_use]
+pub fn count_in_exec_sections_with<R: MemoryReader>(
+    reader: &R,
+    module_base: usize,
+    pattern: WildcardPattern<'_>,
+) -> usize {
+    if module_base == 0 || pattern.is_empty() {
+        return 0;
+    }
+    let Some(sections) = exec_sections_with(reader, module_base) else {
+        return 0;
+    };
+    let mut total = 0usize;
+    for (start, size) in sections {
+        total += count_in_remote_range(reader, start, size, pattern);
     }
     total
 }
@@ -342,6 +455,28 @@ pub fn find_in_section(
     scan_range(section.virtual_address, section.virtual_size, pattern)
 }
 
+/// Find the first occurrence of `pattern` within a named section of a PE
+/// module read through [`MemoryReader`].
+#[cfg(feature = "section-info")]
+#[must_use]
+pub fn find_in_section_with<R: MemoryReader>(
+    reader: &R,
+    module_base: usize,
+    section_name: &[u8],
+    pattern: WildcardPattern<'_>,
+) -> Option<usize> {
+    if module_base == 0 || pattern.is_empty() {
+        return None;
+    }
+    let section = crate::pe::find_section_with(reader, module_base, section_name)?;
+    find_in_remote_range(
+        reader,
+        section.virtual_address,
+        section.virtual_size,
+        pattern,
+    )
+}
+
 /// Count non-overlapping occurrences of `pattern` within the named
 /// section. Companion to [`find_in_section`]; same uniqueness
 /// contract as [`count_in_text`].
@@ -362,6 +497,30 @@ pub fn count_in_section(
         return 0;
     };
     count_range(section.virtual_address, section.virtual_size, pattern)
+}
+
+/// Count occurrences of `pattern` within a named section of a PE module read
+/// through [`MemoryReader`].
+#[cfg(feature = "section-info")]
+#[must_use]
+pub fn count_in_section_with<R: MemoryReader>(
+    reader: &R,
+    module_base: usize,
+    section_name: &[u8],
+    pattern: WildcardPattern<'_>,
+) -> usize {
+    if module_base == 0 || pattern.is_empty() {
+        return 0;
+    }
+    let Some(section) = crate::pe::find_section_with(reader, module_base, section_name) else {
+        return 0;
+    };
+    count_in_remote_range(
+        reader,
+        section.virtual_address,
+        section.virtual_size,
+        pattern,
+    )
 }
 
 /// Iterate over every non-overlapping occurrence of `pattern` within
@@ -443,9 +602,7 @@ fn scan_slice_from(haystack: &[u8], from: usize, pattern: WildcardPattern<'_>) -
         // correctly with the pattern). `search_from < haystack.len()` is
         // guaranteed by `i <= upper` and `anchor_off < pat_len`.
         let search_from = i + anchor_off;
-        let Some(rel) = first_byte_in_slice(&haystack[search_from..], anchor_byte) else {
-            return None;
-        };
+        let rel = first_byte_in_slice(&haystack[search_from..], anchor_byte)?;
         let candidate = search_from + rel - anchor_off;
         if candidate > upper {
             return None;
@@ -543,11 +700,8 @@ fn scan_range_from(
         let search_from = i + anchor_off;
         // SAFETY: `[start+search_from, start+size)` is a subset of the
         // range the caller declared readable.
-        let Some(rel) =
-            (unsafe { first_byte_in_raw(start + search_from, size - search_from, anchor_byte) })
-        else {
-            return None;
-        };
+        let rel =
+            (unsafe { first_byte_in_raw(start + search_from, size - search_from, anchor_byte) })?;
         let candidate = search_from + rel - anchor_off;
         if candidate > upper {
             return None;
@@ -621,8 +775,26 @@ mod tests {
     use super::*;
     use crate::pattern;
     use crate::pe::IMAGE_SCN_MEM_EXECUTE;
+    use crate::MemoryReader;
     use alloc::vec;
     use alloc::vec::Vec;
+
+    struct SliceReader {
+        base: usize,
+        bytes: Vec<u8>,
+    }
+
+    impl MemoryReader for SliceReader {
+        fn read_bytes(&self, addr: usize, buf: &mut [u8]) -> Option<()> {
+            let start = addr.checked_sub(self.base)?;
+            let end = start.checked_add(buf.len())?;
+            if end > self.bytes.len() {
+                return None;
+            }
+            buf.copy_from_slice(&self.bytes[start..end]);
+            Some(())
+        }
+    }
 
     /// Local copy of `synthetic_pe` so this module can build PE-shaped
     /// buffers for the in-process scanner tests without having to reach
@@ -657,6 +829,229 @@ mod tests {
             buf[v..v + bytes.len()].copy_from_slice(bytes);
         }
         buf
+    }
+
+    #[test]
+    fn reader_text_find_and_count() {
+        let text = [0x00u8, 0x11, 0x48, 0x8B, 0x05, 0xFF, 0x00, 0x48, 0x8B, 0x05];
+        let reader = SliceReader {
+            base: 0x6000_0000,
+            bytes: synthetic_pe(&[(*b".text\0\0\0", 0x300, &text, IMAGE_SCN_MEM_EXECUTE)]),
+        };
+        let pat = pattern![0x48, 0x8B, 0x05];
+
+        let hit = find_in_text_with(&reader, reader.base, pat).unwrap();
+        assert_eq!(hit, reader.base + 0x300 + 2);
+        assert_eq!(count_in_text_with(&reader, reader.base, pat), 2);
+    }
+
+    #[test]
+    fn reader_exec_sections_find_across_sections() {
+        let body_a = [0xAAu8, 0xBB];
+        let body_b = [0x90u8, 0x90, 0xC3];
+        let reader = SliceReader {
+            base: 0x6100_0000,
+            bytes: synthetic_pe(&[
+                (*b".text\0\0\0", 0x300, &body_a, IMAGE_SCN_MEM_EXECUTE),
+                (*b".text$mn", 0x310, &body_b, IMAGE_SCN_MEM_EXECUTE),
+            ]),
+        };
+        let pat = pattern![0x90, 0x90, 0xC3];
+
+        let hit = find_in_exec_sections_with(&reader, reader.base, pat).unwrap();
+        assert_eq!(hit, reader.base + 0x310);
+        assert_eq!(count_in_exec_sections_with(&reader, reader.base, pat), 1);
+    }
+
+    #[test]
+    fn reader_exec_sections_returns_none_when_no_match() {
+        let body_a = [0xAAu8, 0xBB];
+        let body_b = [0xCCu8, 0xDD];
+        let reader = SliceReader {
+            base: 0x6100_0000,
+            bytes: synthetic_pe(&[
+                (*b".text\0\0\0", 0x300, &body_a, IMAGE_SCN_MEM_EXECUTE),
+                (*b".text$mn", 0x310, &body_b, IMAGE_SCN_MEM_EXECUTE),
+            ]),
+        };
+        let pat = pattern![0x90, 0x90, 0xC3];
+
+        assert!(find_in_exec_sections_with(&reader, reader.base, pat).is_none());
+    }
+
+    #[test]
+    fn reader_exec_sections_count_returns_zero_for_malformed_module() {
+        let reader = SliceReader {
+            base: 0x6100_0000,
+            bytes: vec![0u8; 0x400],
+        };
+        let pat = pattern![0x90];
+
+        assert_eq!(count_in_exec_sections_with(&reader, reader.base, pat), 0);
+    }
+
+    #[test]
+    fn reader_variants_return_none_or_zero_for_zero_base_and_empty_pattern() {
+        let reader = SliceReader {
+            base: 0x6000_0000,
+            bytes: vec![0u8; 0x400],
+        };
+        let pat = pattern![0x48];
+        let empty: &[Option<u8>] = &[];
+
+        assert!(find_in_text_with(&reader, 0, pat).is_none());
+        assert_eq!(count_in_text_with(&reader, 0, pat), 0);
+        assert!(find_in_exec_sections_with(&reader, 0, pat).is_none());
+        assert_eq!(count_in_exec_sections_with(&reader, 0, pat), 0);
+
+        assert!(find_in_text_with(&reader, reader.base, empty).is_none());
+        assert_eq!(count_in_text_with(&reader, reader.base, empty), 0);
+        assert!(find_in_exec_sections_with(&reader, reader.base, empty).is_none());
+        assert_eq!(count_in_exec_sections_with(&reader, reader.base, empty), 0);
+    }
+
+    #[test]
+    fn reader_text_variants_return_none_or_zero_when_text_missing() {
+        let body = [0x48u8, 0x8B];
+        let reader = SliceReader {
+            base: 0x6000_0000,
+            bytes: synthetic_pe(&[(*b".data\0\0\0", 0x300, &body, 0)]),
+        };
+        let pat = pattern![0x48, 0x8B];
+
+        assert!(find_in_text_with(&reader, reader.base, pat).is_none());
+        assert_eq!(count_in_text_with(&reader, reader.base, pat), 0);
+    }
+
+    #[test]
+    fn reader_text_variants_return_none_or_zero_when_section_read_fails() {
+        let text = [0x48u8, 0x8B, 0x05, 0xFF];
+        let mut bytes = synthetic_pe(&[(*b".text\0\0\0", 0x300, &text, IMAGE_SCN_MEM_EXECUTE)]);
+        bytes.truncate(0x302);
+        let reader = SliceReader {
+            base: 0x6000_0000,
+            bytes,
+        };
+        let pat = pattern![0x48, 0x8B, 0x05];
+
+        assert!(find_in_text_with(&reader, reader.base, pat).is_none());
+        assert_eq!(count_in_text_with(&reader, reader.base, pat), 0);
+    }
+
+    #[test]
+    fn reader_exec_sections_skip_unreadable_sections_for_find_and_count() {
+        let unreadable = [0xAAu8, 0xBB, 0xCC, 0xDD];
+        let readable = [0x90u8, 0x90, 0xC3];
+        let mut bytes = synthetic_pe(&[
+            (*b".text\0\0\0", 0x380, &unreadable, IMAGE_SCN_MEM_EXECUTE),
+            (*b".text$mn", 0x300, &readable, IMAGE_SCN_MEM_EXECUTE),
+        ]);
+        bytes.truncate(0x303);
+        let reader = SliceReader {
+            base: 0x6100_0000,
+            bytes,
+        };
+        let pat = pattern![0x90, 0x90, 0xC3];
+
+        assert_eq!(
+            find_in_exec_sections_with(&reader, reader.base, pat),
+            Some(reader.base + 0x300),
+        );
+        assert_eq!(count_in_exec_sections_with(&reader, reader.base, pat), 1);
+    }
+
+    #[test]
+    fn reader_slice_reader_rejects_underflow_overflow_and_oob_reads() {
+        let reader = SliceReader {
+            base: 0x10,
+            bytes: vec![0u8; 4],
+        };
+        let mut buf = [0u8; 2];
+
+        assert!(reader.read_bytes(reader.base - 1, &mut buf).is_none());
+        assert!(reader.read_bytes(reader.base + 3, &mut buf).is_none());
+
+        let overflow_reader = SliceReader {
+            base: 0,
+            bytes: vec![0u8; 4],
+        };
+        assert!(overflow_reader.read_bytes(usize::MAX, &mut buf).is_none());
+    }
+
+    #[cfg(feature = "section-info")]
+    #[test]
+    fn reader_section_info_scans_named_section() {
+        let body_a = [0xAAu8, 0xBB];
+        let body_b = [0x90u8, 0x90, 0xC3];
+        let reader = SliceReader {
+            base: 0x6200_0000,
+            bytes: synthetic_pe(&[
+                (*b".text\0\0\0", 0x300, &body_a, IMAGE_SCN_MEM_EXECUTE),
+                (*b".text$mn", 0x310, &body_b, IMAGE_SCN_MEM_EXECUTE),
+            ]),
+        };
+        let pat = pattern![0x90, 0x90, 0xC3];
+
+        let hit = find_in_section_with(&reader, reader.base, b".text$mn", pat).unwrap();
+        assert_eq!(hit, reader.base + 0x310);
+        assert_eq!(
+            count_in_section_with(&reader, reader.base, b".text$mn", pat),
+            1
+        );
+    }
+
+    #[cfg(feature = "section-info")]
+    #[test]
+    fn reader_section_info_guard_paths_return_none_or_zero() {
+        let reader = SliceReader {
+            base: 0x6200_0000,
+            bytes: vec![0u8; 0x400],
+        };
+        let pat = pattern![0x90];
+        let empty: &[Option<u8>] = &[];
+
+        assert!(find_in_section_with(&reader, 0, b".rdata", pat).is_none());
+        assert_eq!(count_in_section_with(&reader, 0, b".rdata", pat), 0);
+        assert!(find_in_section_with(&reader, reader.base, b".rdata", empty).is_none());
+        assert_eq!(
+            count_in_section_with(&reader, reader.base, b".rdata", empty),
+            0
+        );
+    }
+
+    #[cfg(feature = "section-info")]
+    #[test]
+    fn reader_section_info_count_returns_zero_when_section_missing() {
+        let body = [0x90u8];
+        let reader = SliceReader {
+            base: 0x6200_0000,
+            bytes: synthetic_pe(&[(*b".text\0\0\0", 0x300, &body, IMAGE_SCN_MEM_EXECUTE)]),
+        };
+        let pat = pattern![0x90];
+
+        assert_eq!(
+            count_in_section_with(&reader, reader.base, b".rdata", pat),
+            0
+        );
+    }
+
+    #[cfg(feature = "section-info")]
+    #[test]
+    fn reader_section_info_returns_none_or_zero_when_section_read_fails() {
+        let body = [0x90u8, 0x90, 0xC3];
+        let mut bytes = synthetic_pe(&[(*b".rdata\0\0", 0x300, &body, 0)]);
+        bytes.truncate(0x302);
+        let reader = SliceReader {
+            base: 0x6200_0000,
+            bytes,
+        };
+        let pat = pattern![0x90, 0x90, 0xC3];
+
+        assert!(find_in_section_with(&reader, reader.base, b".rdata", pat).is_none());
+        assert_eq!(
+            count_in_section_with(&reader, reader.base, b".rdata", pat),
+            0
+        );
     }
 
     // -- slice variants ----------------------------------------------------

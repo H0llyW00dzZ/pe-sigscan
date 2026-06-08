@@ -78,7 +78,7 @@ jobs:
       run: cargo build --all-features --verbose
 
     - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v6
+      uses: codecov/codecov-action@v7
       if: ${{ matrix.os == 'ubuntu-latest' && matrix.rust == 'stable' }}
       env:
         CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
